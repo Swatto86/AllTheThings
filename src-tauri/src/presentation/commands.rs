@@ -3,10 +3,11 @@
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
-use tauri::State;
+use tauri::{Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
+use crate::infrastructure::fileops::{self, ShellVerb};
 use crate::infrastructure::{icons, startup};
 
 use super::settings::{self, Settings, SettingsState, StartFlags};
@@ -71,6 +72,36 @@ pub fn set_settings(state: State<'_, SettingsState>, settings: Settings) -> Resu
 #[tauri::command]
 pub fn start_hidden(flags: State<'_, StartFlags>) -> bool {
     flags.start_hidden
+}
+
+/// Rename the item to `new_name` within its directory; returns the new path.
+#[tauri::command]
+pub fn rename_path(path: String, new_name: String) -> Result<String, String> {
+    fileops::rename(&path, &new_name)
+}
+
+/// Move the item to the Recycle Bin (the UI confirms beforehand).
+#[tauri::command]
+pub fn delete_path(path: String) -> Result<(), String> {
+    fileops::recycle(&path)
+}
+
+/// Invoke a shell verb (`properties` / `open_with` / `run_as`) on the item.
+///
+/// The dialog it opens needs the UI thread's message pump, so the verb is run on
+/// the main thread. This command returns once that work is *dispatched*; a verb
+/// that then fails (other than the user cancelling) is reported to the UI via a
+/// `shell-error` event rather than as the command's own error.
+#[tauri::command]
+pub fn shell_action(app: tauri::AppHandle, path: String, action: String) -> Result<(), String> {
+    let verb = ShellVerb::parse(&action).ok_or_else(|| format!("unknown action '{action}'"))?;
+    let emitter = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(e) = fileops::shell_verb(&path, verb) {
+            let _ = emitter.emit("shell-error", e);
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Open Explorer with the item selected (its containing folder, highlighted).

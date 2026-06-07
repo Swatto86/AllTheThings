@@ -129,6 +129,30 @@ body,
   background: rgba(255, 255, 255, 0.1);
 }
 
+/* Inline rename editor, floated over the selected row's name cell */
+.rename-input {
+  position: fixed;
+  z-index: 70;
+  box-sizing: border-box;
+  padding: 0 4px;
+  font-size: 13px;
+  color: #e5e7eb;
+  background: #11161c;
+  border: 1px solid oklch(var(--p));
+  border-radius: 3px;
+  outline: none;
+}
+.rename-input.hidden {
+  display: none;
+}
+
+/* Confirm dialog body text */
+.confirm-msg {
+  font-size: 13px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
 /* Matched-text highlight in results */
 mark.hl {
   background: rgba(250, 204, 21, 0.4);

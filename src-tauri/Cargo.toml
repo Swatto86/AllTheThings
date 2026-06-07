@@ -1,6 +1,6 @@
 [package]
 name = "allthethings"
-version = "0.2.0"
+version = "0.3.0"
 description = "A voidtools Everything clone — instant filename search via the NTFS MFT"
 authors = ["Swatto <claude.ai@swatto.co.uk>"]
 license = "MIT"
@@ -42,6 +42,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_Security",
+    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",

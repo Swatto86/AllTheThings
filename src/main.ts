@@ -141,6 +141,8 @@ let debounce: number | undefined;
 let highlightTerms: string[] = [];
 let resizing = false;
 let dragSrc: ColKey | null = null;
+let renamingIndex = -1;
+let suppressScrollCancel = false;
 
 const iconCache = new Map<string, string>(); // key -> "data:..." | "none"
 const iconPending = new Set<string>();
@@ -201,6 +203,17 @@ app.innerHTML = /* html */ `
       <div class="settings-actions"><button id="settings-close" class="btn btn-sm">Close</button></div>
     </div>
   </div>
+  <div id="confirm-overlay" class="overlay hidden">
+    <div class="settings-panel" style="width:380px">
+      <div class="settings-title" id="confirm-title">Delete</div>
+      <div id="confirm-msg" class="confirm-msg"></div>
+      <div class="settings-actions" style="gap:8px">
+        <button id="confirm-cancel" class="btn btn-sm">Cancel</button>
+        <button id="confirm-ok" class="btn btn-sm btn-error">Delete</button>
+      </div>
+    </div>
+  </div>
+  <input id="rename-input" class="rename-input hidden" spellcheck="false" autocomplete="off" />
 `;
 
 const q = document.querySelector<HTMLInputElement>("#q")!;
@@ -212,6 +225,11 @@ const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const head = document.querySelector<HTMLDivElement>("#head")!;
 const menu = document.querySelector<HTMLDivElement>("#menu")!;
 const colMenu = document.querySelector<HTMLDivElement>("#col-menu")!;
+const confirmOverlay = document.querySelector<HTMLDivElement>("#confirm-overlay")!;
+const confirmMsg = document.querySelector<HTMLDivElement>("#confirm-msg")!;
+const confirmOk = document.querySelector<HTMLButtonElement>("#confirm-ok")!;
+const confirmCancel = document.querySelector<HTMLButtonElement>("#confirm-cancel")!;
+const renameInput = document.querySelector<HTMLInputElement>("#rename-input")!;
 const sizeBtn = document.querySelector<HTMLButtonElement>("#sizebtn")!;
 const sizeMenu = document.querySelector<HTMLDivElement>("#sizemenu")!;
 const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
@@ -636,23 +654,140 @@ function hideMenu(): void {
   menu.classList.add("hidden");
 }
 
+const RUNAS_EXTS = ["exe", "msi", "bat", "cmd", "com", "ps1", "scr"];
+type MenuRow = "sep" | [string, () => void];
+
 function showMenu(x: number, y: number, h: Hit): void {
-  const items: [string, () => void][] = [
+  const ext = h.isDir ? "" : extOf(h.name);
+  const rows: MenuRow[] = [
     ["Open", () => invoke("open_path", { path: h.path }).catch(reportErr)],
     ["Open containing folder", () => invoke("reveal_path", { path: h.path }).catch(reportErr)],
+  ];
+  if (!h.isDir) {
+    rows.push(["Open with…", () => invoke("shell_action", { path: h.path, action: "open_with" }).catch(reportErr)]);
+  }
+  if (RUNAS_EXTS.includes(ext)) {
+    rows.push(["Run as administrator", () => invoke("shell_action", { path: h.path, action: "run_as" }).catch(reportErr)]);
+  }
+  rows.push(
+    "sep",
     ["Copy full path", () => copy(h.path)],
     ["Copy name", () => copy(h.name)],
-  ];
-  menu.innerHTML = items.map(([label], i) => `<button data-mi="${i}">${esc(label)}</button>`).join("");
-  menu.querySelectorAll<HTMLButtonElement>("button").forEach((b, i) => {
+    "sep",
+    ["Rename", () => startRename()],
+    ["Delete", () => deleteSelected()],
+    "sep",
+    ["Properties", () => invoke("shell_action", { path: h.path, action: "properties" }).catch(reportErr)],
+  );
+
+  const actions: (() => void)[] = [];
+  menu.innerHTML = rows
+    .map((r) => {
+      if (r === "sep") return `<div class="sep"></div>`;
+      const i = actions.push(r[1]) - 1;
+      return `<button data-mi="${i}">${esc(r[0])}</button>`;
+    })
+    .join("");
+  menu.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
     b.onclick = () => {
       hideMenu();
-      items[i][1]();
+      actions[Number(b.dataset.mi)]();
     };
   });
   menu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
-  menu.style.top = `${Math.min(y, window.innerHeight - items.length * 30)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - rows.length * 28)}px`;
   menu.classList.remove("hidden");
+}
+
+// ---- File actions: rename (inline), delete (to Recycle Bin) ----
+function startRename(): void {
+  if (selected < 0 || selected >= hits.length) return;
+  const h = hits[selected];
+  // The row may have been scrolled out of the virtualized window; bring it back
+  // and re-render so its cell exists before we measure it.
+  const top = selected * ROW_HEIGHT;
+  if (top < viewport.scrollTop || top + ROW_HEIGHT > viewport.scrollTop + viewport.clientHeight) {
+    suppressScrollCancel = true;
+    viewport.scrollTop = top < viewport.scrollTop ? top : top + ROW_HEIGHT - viewport.clientHeight;
+    renderVisible();
+  }
+  const rowEl = rows.querySelector<HTMLElement>(`[data-i="${selected}"]`);
+  const nameIdx = columns.findIndex((c) => c.key === "name");
+  const cell = rowEl?.children[nameIdx] as HTMLElement | undefined;
+  if (!cell) return;
+
+  const rect = cell.getBoundingClientRect();
+  renameInput.value = h.name;
+  renameInput.style.left = `${rect.left}px`;
+  renameInput.style.top = `${rect.top}px`;
+  renameInput.style.width = `${rect.width}px`;
+  renameInput.style.height = `${rect.height}px`;
+  renameInput.classList.remove("hidden");
+  renameInput.focus();
+  const dot = h.name.lastIndexOf(".");
+  renameInput.setSelectionRange(0, dot > 0 ? dot : h.name.length);
+  renamingIndex = selected;
+}
+
+function cancelRename(): void {
+  if (renamingIndex < 0) return;
+  renamingIndex = -1;
+  renameInput.classList.add("hidden");
+}
+
+async function commitRename(restoreFocus: boolean): Promise<void> {
+  if (renamingIndex < 0) return;
+  const idx = renamingIndex;
+  const h = hits[idx];
+  const newName = renameInput.value.trim();
+  cancelRename();
+  // On Enter, return focus to the search box so keyboard nav keeps working; on
+  // blur, leave focus wherever the user clicked.
+  if (restoreFocus) q.focus();
+  if (!newName || newName === h.name) return;
+  try {
+    const newPath = await invoke<string>("rename_path", { path: h.path, newName });
+    h.name = newName;
+    h.path = newPath;
+    renderVisible();
+  } catch (e) {
+    reportErr(e);
+  }
+}
+
+async function deleteSelected(): Promise<void> {
+  if (selected < 0 || selected >= hits.length || confirmResolve !== null) return;
+  const h = hits[selected];
+  if (!(await confirmDelete(h.name))) return;
+  try {
+    await invoke("delete_path", { path: h.path });
+    hits.splice(selected, 1);
+    total = Math.max(0, total - 1);
+    if (selected >= hits.length) selected = hits.length - 1;
+    spacer.style.height = `${hits.length * ROW_HEIGHT}px`;
+    countEl.textContent = `${total.toLocaleString()} found`;
+    renderVisible();
+  } catch (e) {
+    reportErr(e);
+  }
+}
+
+// ---- Confirm dialog ----
+let confirmResolve: ((ok: boolean) => void) | null = null;
+
+function confirmDelete(name: string): Promise<boolean> {
+  confirmMsg.textContent = `Move "${name}" to the Recycle Bin?`;
+  confirmOverlay.classList.remove("hidden");
+  confirmOk.focus();
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+  });
+}
+
+function resolveConfirm(ok: boolean): void {
+  confirmOverlay.classList.add("hidden");
+  confirmResolve?.(ok);
+  confirmResolve = null;
 }
 
 async function copy(text: string): Promise<void> {
@@ -850,6 +985,10 @@ viewport.addEventListener(
   () => {
     hideMenu();
     colMenu.classList.add("hidden");
+    // A user scroll cancels an in-progress rename; a scroll we triggered to
+    // bring the row into view (startRename) must not.
+    if (suppressScrollCancel) suppressScrollCancel = false;
+    else cancelRename();
     renderVisible();
   },
   { passive: true },
@@ -919,6 +1058,49 @@ settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
 listen("open-settings", openSettings);
+listen<string>("shell-error", (e) => reportErr(e.payload));
+
+// Confirm dialog
+confirmOk.addEventListener("click", () => resolveConfirm(true));
+confirmCancel.addEventListener("click", () => resolveConfirm(false));
+confirmOverlay.addEventListener("click", (e) => {
+  if (e.target === confirmOverlay) resolveConfirm(false);
+});
+
+// Inline rename input
+renameInput.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Enter") {
+    e.preventDefault();
+    commitRename(true);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    cancelRename();
+    q.focus();
+  }
+});
+renameInput.addEventListener("blur", () => commitRename(false));
+
+// Rename / delete shortcuts for the selected row. Suppressed while renaming, a
+// modal overlay is open, or a delete confirm is already in flight.
+window.addEventListener("keydown", (e) => {
+  if (
+    renamingIndex >= 0 ||
+    selected < 0 ||
+    confirmResolve !== null ||
+    !settingsOverlay.classList.contains("hidden") ||
+    !confirmOverlay.classList.contains("hidden")
+  ) {
+    return;
+  }
+  if (e.key === "F2") {
+    e.preventDefault();
+    startRename();
+  } else if (e.key === "Delete" && document.activeElement !== q) {
+    e.preventDefault();
+    deleteSelected();
+  }
+});
 
 window.addEventListener("click", (e) => {
   if (!menu.contains(e.target as Node)) hideMenu();
@@ -933,6 +1115,7 @@ window.addEventListener("keydown", (e) => {
     sizeMenu.classList.add("hidden");
     hideHistory();
     closeSettings();
+    if (!confirmOverlay.classList.contains("hidden")) resolveConfirm(false);
   }
 });
 
