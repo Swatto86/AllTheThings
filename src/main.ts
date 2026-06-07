@@ -84,6 +84,7 @@ let total = 0;
 let selected = -1;
 let searchSeq = 0;
 let debounce: number | undefined;
+let highlightTerms: string[] = [];
 let resizing = false;
 let dragSrc: ColKey | null = null;
 
@@ -125,6 +126,7 @@ app.innerHTML = /* html */ `
     <div id="status" class="text-xs px-2 py-1 border-t border-base-300 bg-base-200 opacity-80"></div>
   </div>
   <div id="menu" class="menu-pop hidden"></div>
+  <div id="history-menu" class="menu-pop hidden"></div>
   <div id="settings-overlay" class="overlay hidden">
     <div class="settings-panel">
       <div class="settings-title">Settings</div>
@@ -156,6 +158,7 @@ const head = document.querySelector<HTMLDivElement>("#head")!;
 const menu = document.querySelector<HTMLDivElement>("#menu")!;
 const sizeBtn = document.querySelector<HTMLButtonElement>("#sizebtn")!;
 const sizeMenu = document.querySelector<HTMLDivElement>("#sizemenu")!;
+const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overlay")!;
 const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
@@ -203,6 +206,58 @@ function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
+// Plain terms to highlight: quoted phrases and bare words, minus operators,
+// negated terms, ext:/size:/file:/folder: functions, and wildcards.
+function computeHighlightTerms(query: string, regex: boolean): string[] {
+  if (regex) return [];
+  const terms: string[] = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(query)) !== null) {
+    if (m[1] !== undefined) {
+      if (m[1]) terms.push(m[1].toLowerCase());
+      continue;
+    }
+    let tok = m[2];
+    if (tok === "|" || tok.startsWith("!")) continue;
+    const lower = tok.toLowerCase();
+    if (/^(ext|size|file|files|folder|folders|dir):/.test(lower)) continue;
+    if (lower.startsWith("path:")) tok = tok.slice(5);
+    if (!tok || tok.includes("*") || tok.includes("?")) continue;
+    terms.push(tok.toLowerCase());
+  }
+  return terms;
+}
+
+// Escape `raw` and wrap any matched term occurrences in <mark>.
+function highlight(raw: string): string {
+  if (!highlightTerms.length) return esc(raw);
+  const lower = raw.toLowerCase();
+  const ranges: [number, number][] = [];
+  for (const t of highlightTerms) {
+    let i = lower.indexOf(t);
+    while (i !== -1) {
+      ranges.push([i, i + t.length]);
+      i = lower.indexOf(t, i + t.length);
+    }
+  }
+  if (!ranges.length) return esc(raw);
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+  let out = "";
+  let pos = 0;
+  for (const [s, e] of merged) {
+    out += esc(raw.slice(pos, s)) + `<mark class="hl">${esc(raw.slice(s, e))}</mark>`;
+    pos = e;
+  }
+  return out + esc(raw.slice(pos));
+}
+
 // ---- Icons ----
 function iconKey(h: Hit): string {
   return h.isDir ? "dir" : extOf(h.name) || "file";
@@ -248,9 +303,9 @@ function setCols(): void {
 function cellHtml(h: Hit, key: ColKey): string {
   switch (key) {
     case "name":
-      return `<div title="${esc(h.name)}">${iconHtml(h)}${esc(h.name)}</div>`;
+      return `<div title="${esc(h.name)}">${iconHtml(h)}${highlight(h.name)}</div>`;
     case "path":
-      return `<div class="opacity-70" title="${esc(h.path)}">${esc(dirOf(h.path))}</div>`;
+      return `<div class="opacity-70" title="${esc(h.path)}">${highlight(dirOf(h.path))}</div>`;
     case "size":
       return `<div class="text-right pr-2 opacity-80">${fmtSize(h.size, h.isDir)}</div>`;
     case "date":
@@ -362,6 +417,7 @@ function startResize(e: PointerEvent, key: ColKey): void {
 // ---- Search ----
 async function runSearch(): Promise<void> {
   const seq = ++searchSeq;
+  highlightTerms = computeHighlightTerms(options.query, options.regex);
   try {
     const res = await invoke<SearchResponse>("search", { options });
     if (seq !== searchSeq) return; // superseded
@@ -465,6 +521,58 @@ function applySizePreset(expr: string): void {
   q.focus();
 }
 
+// ---- Search history ----
+const HISTORY_KEY = "att.history";
+const HISTORY_MAX = 25;
+let history: string[] = loadHistory();
+
+function loadHistory(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]");
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+function addHistory(query: string): void {
+  const v = query.trim();
+  if (!v) return;
+  history = [v, ...history.filter((h) => h !== v)].slice(0, HISTORY_MAX);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function showHistory(): void {
+  if (q.value.trim() || !history.length) {
+    hideHistory();
+    return;
+  }
+  historyMenu.innerHTML = history.map((h, i) => `<button data-hi="${i}">${esc(h)}</button>`).join("");
+  historyMenu.querySelectorAll<HTMLButtonElement>("button").forEach((b, i) => {
+    b.addEventListener("mousedown", (e) => e.preventDefault()); // keep input focus
+    b.addEventListener("click", () => {
+      q.value = history[i];
+      options.query = history[i];
+      hideHistory();
+      runSearch();
+      q.focus();
+    });
+  });
+  const r = q.getBoundingClientRect();
+  historyMenu.style.left = `${r.left}px`;
+  historyMenu.style.top = `${r.bottom + 2}px`;
+  historyMenu.style.minWidth = `${r.width}px`;
+  historyMenu.classList.remove("hidden");
+}
+
+function hideHistory(): void {
+  historyMenu.classList.add("hidden");
+}
+
 function syncControls(): void {
   document.querySelectorAll<HTMLButtonElement>(".opt").forEach((b) => {
     const on = options[b.dataset.opt as "matchCase" | "wholeWord" | "regex" | "matchPath"];
@@ -559,7 +667,13 @@ async function installUpdate(): Promise<void> {
 // ---- Events ----
 q.addEventListener("input", () => {
   options.query = q.value;
+  hideHistory();
   scheduleSearch();
+});
+q.addEventListener("focus", showHistory);
+q.addEventListener("blur", () => {
+  addHistory(q.value);
+  window.setTimeout(hideHistory, 150);
 });
 
 viewport.addEventListener(
@@ -633,11 +747,13 @@ listen("open-settings", openSettings);
 window.addEventListener("click", (e) => {
   if (!menu.contains(e.target as Node)) hideMenu();
   if (e.target !== sizeBtn && !sizeMenu.contains(e.target as Node)) sizeMenu.classList.add("hidden");
+  if (e.target !== q && !historyMenu.contains(e.target as Node)) hideHistory();
 });
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     hideMenu();
     sizeMenu.classList.add("hidden");
+    hideHistory();
     closeSettings();
   }
 });

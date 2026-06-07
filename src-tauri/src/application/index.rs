@@ -218,18 +218,12 @@ impl SearchIndex {
 
     fn entry_matches(&self, idx: usize, matcher: &Matcher) -> bool {
         let e = &self.entries[idx];
-        if !matcher.kind_allows(e.is_dir)
-            || !matcher.size_allows(e.size, e.is_dir)
-            || !matcher.ext_allows(&e.name_lower)
-        {
-            return false;
-        }
         if matcher.needs_path() {
             let path = self.build_path(idx);
             let lower = path.to_lowercase();
-            matcher.text_allows(&path, &lower)
+            matcher.eval(&e.name, &e.name_lower, &path, &lower, e.is_dir, e.size)
         } else {
-            matcher.text_allows(&e.name, &e.name_lower)
+            matcher.eval(&e.name, &e.name_lower, "", "", e.is_dir, e.size)
         }
     }
 

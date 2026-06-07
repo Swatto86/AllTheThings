@@ -34,7 +34,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | `ext:`, `file:`, `folder:` | ✅ | ✅ | |
 | `path:` (match against full path) | ✅ | ✅ | |
 | `size:` with ranges + units | ✅ | ✅ | e.g. `size:>=1mb size:<16mb`. |
-| OR `|`, NOT `!`, grouping `( )`, quotes `" "` | ✅ | ❌ | Only AND today. |
+| OR `\|`, NOT `!`, quotes `" "` | ✅ | ✅ | Grouping `( )` not yet. |
 | Date filters `dm:` `dc:` `da:` | ✅ | ❌ | |
 | Attribute filter `attrib:` | ✅ | ❌ | |
 | Functions: `parent:` `child:` `count:` `dupe:` `len:` … | ✅ | ❌ | |
@@ -55,7 +55,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Reorder columns | ✅ | ✅ | Drag the header. |
 | Add/remove columns (Created, Accessed, Type, Attributes, Ext, Run count…) | ✅ | ❌ | Fixed 4 columns. |
 | Folders-first sorting | ✅ | ❌ | |
-| Highlight matched text in results | ✅ | ❌ | |
+| Highlight matched text in results | ✅ | ✅ | Name + Path. |
 | Thumbnail / large-icon views | ✅ | ❌ | Details view only. |
 | Preview pane | ✅ | ❌ | |
 
@@ -96,7 +96,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Feature | Everything | AllTheThings | Notes |
 |---|:---:|:---:|---|
 | Bookmarks | ✅ | ❌ | |
-| Search history | ✅ | ❌ | |
+| Search history | ✅ | ✅ | Recent queries dropdown. |
 | Built-in / custom filters | ✅ | ❌ | Size presets only. |
 | File lists (`.efu`) — create / open | ✅ | ❌ | |
 | Export results (TXT / CSV / EFU) | ✅ | ❌ | |
@@ -109,16 +109,17 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 
 ## Suggested roadmap (rough priority)
 
-1. **Boolean operators & quotes** — `OR` (`|`), `NOT` (`!`), grouping, `"exact phrase"`. High value, low cost.
-2. **Date filters & more columns** — `dm:`/`dc:`/`da:`, plus Date Created / Type / Attributes columns (the MFT already has the data).
-3. **Match highlighting** in results.
-4. **Richer context menu** — Delete, Rename, Properties, full shell menu, drag-out.
-5. **Folders-first sorting** and an add/remove-columns picker.
-6. **Search history + bookmarks + saved filters.**
-7. **Export** (CSV/TXT) and **`.efu` file lists.**
-8. **Global hotkey** + Explorer "search here" integration.
-9. **Light theme** and localization.
-10. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, and an **HTTP/IPC** query interface.
+1. **Date filters & more columns** — `dm:`/`dc:`/`da:`, plus Date Created / Type / Attributes / Extension columns (the MFT already has the data).
+2. **Richer context menu** — Delete, Rename, Properties, full shell menu, drag-out.
+3. **Folders-first sorting** and an add/remove-columns picker.
+4. **Bookmarks & saved filters** (search history is done).
+5. **Query grouping** `( )` and exact-phrase refinements.
+6. **Export** (CSV/TXT) and **`.efu` file lists.**
+7. **Global hotkey** + Explorer "search here" integration.
+8. **Light theme** and localization.
+9. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, and an **HTTP/IPC** query interface.
+
+_Recently shipped: boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at

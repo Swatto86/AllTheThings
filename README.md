@@ -17,7 +17,8 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Hardlink-aware**: a file appears at every path it is linked from (e.g. `System32\ntoskrnl.exe` and its WinSxS hardlinks).
 - **Persistent index cache**: the index is saved to `%LOCALAPPDATA%\AllTheThings\cache`; subsequent launches load it instantly and replay only USN changes since (full rescan only if the journal was recreated or its tail purged).
 - **No white flash on launch**: the window is shown only after the dark UI has painted.
-- **Query syntax**: space-separated AND terms, `*`/`?` wildcards, and operators `ext:`, `path:`, `file:`, `folder:`, `size:` (e.g. `ext:dll size:>100mb`, `report*.pdf`).
+- **Query syntax**: AND (space), **OR** (`|`), **NOT** (`!`), `"quoted phrases"`, `*`/`?` wildcards, regex, and `ext:`/`path:`/`file:`/`folder:`/`size:` functions (e.g. `ext:dll | ext:exe`, `report !draft size:>1mb`).
+- **Matched-text highlighting** in results, and a **recent-searches** history dropdown.
 - **Toggles** (toolbar): match case, whole word, regular expression, match full path.
 - **Size filter** dropdown: Empty / Tiny / Small / Medium / Large / Huge / Gigantic presets (inserts the matching `size:` range).
 - **Shell file-type icons** — the real Windows icon per extension/folder, fetched on demand and cached.

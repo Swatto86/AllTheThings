@@ -111,6 +111,14 @@ body,
   background: rgba(255, 255, 255, 0.1);
 }
 
+/* Matched-text highlight in results */
+mark.hl {
+  background: rgba(250, 204, 21, 0.4);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 /* Update banner */
 .update-banner {
   display: flex;
