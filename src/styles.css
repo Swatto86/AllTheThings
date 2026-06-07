@@ -121,6 +121,10 @@ body,
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
 }
+/* Two classes beats `.overlay` (one class), so `.hidden` actually hides it. */
+.overlay.hidden {
+  display: none;
+}
 .settings-panel {
   width: 420px;
   max-width: 90vw;
