@@ -34,11 +34,12 @@ dependencies = [
 
 [[package]]
 name = "allthethings"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bincode",
+ "chrono",
  "parking_lot",
  "png 0.17.16",
  "rayon",
