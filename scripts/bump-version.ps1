@@ -20,7 +20,8 @@
 
 .EXAMPLE
     .\scripts\bump-version.ps1 0.2.0 -Tag
-    git push origin main --follow-tags   # triggers the release workflow
+    git push origin main --tags
+    gh release create v0.2.0 --generate-notes   # builds + attaches the installer
 #>
 [CmdletBinding()]
 param(
@@ -112,9 +113,10 @@ if ($Tag) {
     git -C $root add $files
     git -C $root commit -m "Release v$Version"
     git -C $root tag "v$Version"
-    Write-Host "Committed and tagged v$Version. Push with:" -ForegroundColor Green
-    Write-Host "  git push origin main --follow-tags"
+    Write-Host "Committed and tagged v$Version. Push and release with:" -ForegroundColor Green
+    Write-Host "  git push origin main --tags"
+    Write-Host "  gh release create v$Version --generate-notes   # builds + attaches the installer"
 }
 else {
-    Write-Host "Bumped to $Version. Review, then commit and tag to release." -ForegroundColor Green
+    Write-Host "Bumped to $Version. Commit, then create a release to build the installer." -ForegroundColor Green
 }

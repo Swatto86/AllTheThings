@@ -37,7 +37,7 @@ Working build with daily-driver parity. Files created after the initial scan sho
 
 Grab the latest installer from the [**Releases**](https://github.com/Swatto86/AllTheThings/releases) page (`AllTheThings_<version>_x64-setup.exe`) and run it — it requests Administrator and registers an elevated logon task so the app auto-starts into the system tray and indexes in the background. Uninstalling removes the task.
 
-Releases are built automatically by the [release workflow](.github/workflows/release.yml) whenever a `v*` tag is pushed.
+Releases are built automatically by the [release workflow](.github/workflows/release.yml): **publish a GitHub release** for a `vX.Y.Z` tag (UI or `gh release create vX.Y.Z --generate-notes`) and the installer is built and attached to it. See [Releasing](#releasing) below.
 
 ## Requirements
 
@@ -69,6 +69,23 @@ If not elevated, the status bar shows an access-denied error and results stay em
 ```powershell
 npm run tauri build    # produces an NSIS installer under src-tauri/target/release/bundle
 ```
+
+## Releasing
+
+Versions live in three files (`package.json`, `src-tauri/Cargo.toml`,
+`src-tauri/tauri.conf.json`); the helper keeps them in lockstep:
+
+```powershell
+npm run bump -- 0.2.0          # set the version everywhere + sync Cargo.lock
+git commit -am "Release v0.2.0"
+git push
+gh release create v0.2.0 --generate-notes   # creates the tag + release
+```
+
+Publishing the release triggers the [release workflow](.github/workflows/release.yml),
+which builds the installer and **attaches `AllTheThings_<version>_x64-setup.exe`
+to that release**. (You can also re-run it from the Actions tab via *Run
+workflow* against an existing tag.)
 
 ## Architecture
 
