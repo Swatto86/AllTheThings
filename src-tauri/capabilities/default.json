@@ -8,6 +8,7 @@
     "core:window:allow-show",
     "opener:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    "dialog:allow-save"
   ]
 }

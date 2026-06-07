@@ -1,11 +1,14 @@
 //! Tauri command handlers — the only place the UI touches the backend.
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
 use tauri::{Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::application::export::{self, ExportFormat};
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::fileops::{self, ShellVerb};
 use crate::infrastructure::{icons, startup};
@@ -23,6 +26,46 @@ pub fn search(state: State<'_, AppState>, options: SearchOptions) -> SearchResul
 #[tauri::command]
 pub fn index_status(state: State<'_, AppState>) -> IndexStatus {
     state.status()
+}
+
+/// Upper bound on rows written by a single export — a guardrail, not a normal limit.
+const EXPORT_CAP: usize = 1_000_000;
+
+/// Outcome of an export: rows actually `written` and the `total` that matched.
+/// They differ only when the match count exceeds [`EXPORT_CAP`], letting the UI
+/// flag a capped (incomplete) export instead of reporting it as complete.
+#[derive(serde::Serialize)]
+pub struct ExportSummary {
+    pub written: usize,
+    pub total: usize,
+}
+
+/// Export the current results to `path` as `format` (`csv`/`txt`/`efu`), re-running
+/// the search unbounded (up to [`EXPORT_CAP`]).
+#[tauri::command]
+pub fn export_results(
+    state: State<'_, AppState>,
+    options: SearchOptions,
+    format: String,
+    path: String,
+) -> Result<ExportSummary, String> {
+    let fmt = ExportFormat::parse(&format).ok_or_else(|| format!("unknown format '{format}'"))?;
+    let mut opts = options;
+    opts.limit = EXPORT_CAP;
+
+    let result = state.catalog.read().search(&opts);
+    if let Some(e) = result.error {
+        return Err(e);
+    }
+
+    let file = File::create(&path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(file);
+    export::write_export(&result.hits, fmt, &mut writer).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(ExportSummary {
+        written: result.hits.len(),
+        total: result.total,
+    })
 }
 
 /// Open a file or folder with its default handler.

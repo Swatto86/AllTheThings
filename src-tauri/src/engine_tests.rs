@@ -8,6 +8,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
+use crate::application::export::ExportFormat;
 use crate::application::{Catalog, SearchIndex, SearchOptions};
 use crate::infrastructure::cache;
 use crate::infrastructure::ntfs::{
@@ -112,6 +113,19 @@ fn index_all_volumes_and_search() {
     let r = catalog.search(&opts("dm:>=2000-01-01"));
     println!("'dm:>=2000-01-01' -> {} total", r.total);
     assert!(r.total > 0, "date filter returned nothing");
+
+    // Export round-trip over real hits (CSV header + one line per hit).
+    let r = catalog.search(&opts("ext:dll"));
+    let mut buf = Vec::new();
+    crate::application::export::write_export(&r.hits, ExportFormat::Csv, &mut buf).expect("export");
+    let csv = String::from_utf8(buf).expect("utf8");
+    assert!(csv.starts_with("Name,Path,Size,"), "missing CSV header");
+    assert_eq!(
+        csv.lines().count(),
+        r.hits.len() + 1,
+        "expected one CSV line per hit plus the header"
+    );
+    println!("export: {} CSV rows for ext:dll", r.hits.len());
 
     // Full cache round-trip through disk + USN catch-up.
     let drive0 = drives[0];

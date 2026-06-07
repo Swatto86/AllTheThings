@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { save } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
 // ---- Backend contract (mirrors src-tauri presentation DTOs) ----
@@ -183,6 +184,7 @@ app.innerHTML = /* html */ `
         <button data-opt="matchPath" title="Match full path" class="opt btn btn-xs join-item">/</button>
       </div>
       <button id="folders-first" title="Folders first" class="btn btn-xs">📁</button>
+      <button id="export" title="Export results (CSV / TXT / EFU)" class="btn btn-xs">Export</button>
       <button id="gear" title="Settings" class="btn btn-xs">⚙</button>
       <div id="count" class="text-xs opacity-60 whitespace-nowrap min-w-[130px] text-right"></div>
     </div>
@@ -246,6 +248,7 @@ const sizeBtn = document.querySelector<HTMLButtonElement>("#sizebtn")!;
 const sizeMenu = document.querySelector<HTMLDivElement>("#sizemenu")!;
 const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
 const foldersFirstBtn = document.querySelector<HTMLButtonElement>("#folders-first")!;
+const exportBtn = document.querySelector<HTMLButtonElement>("#export")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overlay")!;
 const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
@@ -985,6 +988,45 @@ async function installUpdate(): Promise<void> {
   }
 }
 
+// ---- Export ----
+async function exportResults(): Promise<void> {
+  if (!hits.length) {
+    statusEl.textContent = "Nothing to export";
+    return;
+  }
+  let path: string | null;
+  try {
+    path = await save({
+      defaultPath: "search-results.csv",
+      filters: [
+        { name: "CSV", extensions: ["csv"] },
+        { name: "Text", extensions: ["txt"] },
+        { name: "Everything File List", extensions: ["efu"] },
+      ],
+    });
+  } catch (e) {
+    reportErr(e);
+    return;
+  }
+  if (!path) return; // cancelled
+  // Format follows the chosen extension (only csv/txt/efu are recognised).
+  const dot = path.lastIndexOf(".");
+  const slash = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  const ext = dot > slash ? path.slice(dot + 1).toLowerCase() : "";
+  const format = ext === "txt" ? "txt" : ext === "efu" ? "efu" : "csv";
+  const unknownExt = ext !== "" && ext !== "csv" && ext !== "txt" && ext !== "efu";
+  statusEl.textContent = "Exporting…";
+  try {
+    const r = await invoke<{ written: number; total: number }>("export_results", { options, format, path });
+    let msg = `Exported ${r.written.toLocaleString()} items`;
+    if (r.written < r.total) msg += ` (of ${r.total.toLocaleString()}; capped at 1,000,000)`;
+    if (unknownExt) msg += " as CSV";
+    statusEl.textContent = `${msg} to ${path}`;
+  } catch (e) {
+    reportErr(e);
+  }
+}
+
 // ---- Events ----
 q.addEventListener("input", () => {
   options.query = q.value;
@@ -1075,6 +1117,7 @@ foldersFirstBtn.addEventListener("click", () => {
   runSearch();
   q.focus();
 });
+exportBtn.addEventListener("click", exportResults);
 gear.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
 updateInstall.addEventListener("click", installUpdate);

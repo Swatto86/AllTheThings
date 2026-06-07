@@ -4,6 +4,7 @@
 
 pub mod catalog;
 pub mod error;
+pub mod export;
 pub mod index;
 pub mod indexer;
 pub mod search;

@@ -98,8 +98,8 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Bookmarks | ✅ | ❌ | |
 | Search history | ✅ | ✅ | Recent queries dropdown. |
 | Built-in / custom filters | ✅ | ❌ | Size presets only. |
-| File lists (`.efu`) — create / open | ✅ | ❌ | |
-| Export results (TXT / CSV / EFU) | ✅ | ❌ | |
+| File lists (`.efu`) — create / open | ✅ | ⚠️ | Can **write** `.efu`; opening an `.efu` as a source not yet. |
+| Export results (TXT / CSV / EFU) | ✅ | ✅ | Toolbar **Export** → Save dialog; format from the chosen extension. |
 | Command-line interface (`es.exe`) | ✅ | ❌ | |
 | HTTP server (web UI) | ✅ | ❌ | |
 | ETP/FTP server + client (remote search) | ✅ | ❌ | |
@@ -112,12 +112,12 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 1. **Full shell context menu** (`IContextMenu`) and **drag & drop out** — discrete verbs (Delete, Rename, Properties, Open with, Run as admin) are done.
 2. **Bookmarks & saved filters** (search history is done).
 3. **Query grouping** `( )` and exact-phrase refinements.
-4. **Export** (CSV/TXT) and **`.efu` file lists.**
+4. **Open `.efu` file lists** as a search source (writing them is done).
 5. **Global hotkey** + Explorer "search here" integration.
 6. **Light theme** and localization.
 7. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, an **HTTP/IPC** query interface, and a sortable **Type** column.
 
-_Recently shipped: folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
+_Recently shipped: export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at
