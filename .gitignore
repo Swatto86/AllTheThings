@@ -1,0 +1,16 @@
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Generated icon source
+src-tauri/icons/source.png
+
+# Editor / OS
+.vscode/
+.idea/
+*.log
+Thumbs.db

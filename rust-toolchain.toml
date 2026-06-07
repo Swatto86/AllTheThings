@@ -1,0 +1,5 @@
+# Pin the toolchain at the repo root so rustup resolves the same version
+# whether cargo is run from here or via --manifest-path src-tauri/Cargo.toml.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

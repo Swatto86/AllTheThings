@@ -1,0 +1,57 @@
+name: Release
+
+# Build the Windows installer and attach it to a GitHub release whenever a
+# version tag is pushed (e.g. `git tag v0.1.0 && git push origin v0.1.0`),
+# or manually for a given tag.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Pinned to match rust-toolchain.toml at the repo root.
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "AllTheThings ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseBody: |
+            Download the NSIS installer below and run it (it requests Administrator).
+            The installer registers an elevated logon task so AllTheThings auto-starts
+            into the system tray and indexes in the background.
+          releaseDraft: true
+          prerelease: false
