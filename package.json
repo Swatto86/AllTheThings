@@ -18,7 +18,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bump": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
