@@ -1,6 +1,6 @@
 [package]
 name = "allthethings"
-version = "0.3.0"
+version = "0.4.0"
 description = "A voidtools Everything clone — instant filename search via the NTFS MFT"
 authors = ["Swatto <claude.ai@swatto.co.uk>"]
 license = "MIT"
