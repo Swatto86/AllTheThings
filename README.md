@@ -25,6 +25,7 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Right-click**: open, open containing folder (Explorer with the item selected), copy full path, copy name.
 - **Single-instance**: launching again focuses the running window.
 - **System tray**: minimise/close to tray; Show / Settings / Quit menu; left-click to restore.
+- **Auto-updates**: on launch it checks GitHub Releases for a newer **signed** build; an in-app banner offers one-click *Install & restart*. Also available from Settings → *Check now*.
 - **Run at startup** (Settings): registers an elevated logon scheduled task so it auto-starts with admin rights into the tray and indexes in the background — no UAC prompt. The installer sets this up too.
 - **Settings**: start-with-Windows and close-to-tray toggles, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
 - **Keyboard**: type to filter, ↑/↓ to move, Enter to open.
@@ -83,9 +84,21 @@ gh release create v0.2.0 --generate-notes   # creates the tag + release
 ```
 
 Publishing the release triggers the [release workflow](.github/workflows/release.yml),
-which builds the installer and **attaches `AllTheThings_<version>_x64-setup.exe`
-to that release**. (You can also re-run it from the Actions tab via *Run
-workflow* against an existing tag.)
+which builds the installer and attaches three assets to the release:
+`AllTheThings_<version>_x64-setup.exe`, its `.sig` signature, and `latest.json`
+(the updater manifest). Installed copies poll
+`releases/latest/download/latest.json` and self-update. (You can also re-run the
+workflow from the Actions tab via *Run workflow* against an existing tag.)
+
+### Update signing
+
+Updates are signed with a minisign keypair. The **public** key is baked into
+`tauri.conf.json` (`plugins.updater.pubkey`); the **private** key is the
+`TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret. The private key was generated
+with `npx tauri signer generate` and lives at
+`%USERPROFILE%\.allthethings-keys\updater.key` — **back it up** (e.g. a password
+manager). If it is lost, you cannot ship updates that existing installs will
+accept, and you'd have to re-key (which breaks the update path for already-installed copies).
 
 ## Architecture
 

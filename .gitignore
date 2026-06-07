@@ -9,6 +9,10 @@ src-tauri/gen/
 # Generated icon source
 src-tauri/icons/source.png
 
+# Updater signing keys — never commit these
+*.key
+*.key.pub
+
 # Editor / OS
 .vscode/
 .idea/

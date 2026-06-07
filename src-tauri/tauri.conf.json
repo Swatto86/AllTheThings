@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "Swatto",
     "copyright": "© 2026 Swatto",
     "license": "MIT",
@@ -51,5 +52,12 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Swatto86/AllTheThings/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkyMzlGMTc0NDgwNTVBRjUKUldUMVdnVklkUEU1a3ZTNkY1eFFUb25JSlRDc1dadHJNOHArMzQ0d0kyTENOWEVjeGNoaHlkVDUK"
+    }
+  }
 }

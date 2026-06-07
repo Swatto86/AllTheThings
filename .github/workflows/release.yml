@@ -48,15 +48,37 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build the installer
+      - name: Build the signed installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: npm run tauri build
 
-      - name: Attach installer to the release
+      - name: Attach installer + updater manifest to the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $nsis = "src-tauri/target/release/bundle/nsis"
+          $exe = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
           if (-not $exe) { throw "No NSIS installer was produced" }
-          Write-Host "Uploading $($exe.Name) to release $env:TAG"
-          gh release upload $env:TAG $exe.FullName --clobber --repo $env:GITHUB_REPOSITORY
+          $sigPath = "$($exe.FullName).sig"
+          if (-not (Test-Path $sigPath)) { throw "No .sig produced — updater signing is not configured" }
+
+          $version = $env:TAG.TrimStart("v")
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:TAG/$($exe.Name)"
+          $manifest = [ordered]@{
+            version   = $version
+            notes     = "See https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:TAG"
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = (Get-Content $sigPath -Raw).Trim()
+                url       = $url
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 latest.json
+
+          Write-Host "Uploading installer, signature and latest.json to $env:TAG"
+          gh release upload $env:TAG $exe.FullName $sigPath latest.json --clobber --repo $env:GITHUB_REPOSITORY

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import "./styles.css";
 
 // ---- Backend contract (mirrors src-tauri presentation DTOs) ----
@@ -92,6 +94,13 @@ let iconRerenderQueued = false;
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = /* html */ `
   <div class="flex flex-col h-screen bg-base-100 text-base-content">
+    <div id="update-banner" class="update-banner hidden">
+      <span id="update-text"></span>
+      <div class="flex gap-2 ml-auto">
+        <button id="update-install" class="btn btn-xs btn-primary">Install &amp; restart</button>
+        <button id="update-later" class="btn btn-xs btn-ghost">Later</button>
+      </div>
+    </div>
     <div class="flex items-center gap-2 p-2 border-b border-base-300">
       <input id="q" type="text" placeholder="Search all the things…" autocomplete="off" spellcheck="false"
         class="input input-bordered input-sm flex-1 font-mono" />
@@ -127,6 +136,10 @@ app.innerHTML = /* html */ `
         <span>Close button minimizes to tray<br><span class="hint">Otherwise the window closing quits the app</span></span>
         <input type="checkbox" id="set-tray" class="toggle toggle-sm toggle-primary" />
       </label>
+      <div class="settings-row">
+        <span>Updates<br><span class="hint" id="update-status">AllTheThings checks for updates on launch.</span></span>
+        <button id="check-updates" class="btn btn-sm">Check now</button>
+      </div>
       <div id="settings-msg" class="settings-msg"></div>
       <div class="settings-actions"><button id="settings-close" class="btn btn-sm">Close</button></div>
     </div>
@@ -149,6 +162,12 @@ const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
 const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
 const settingsClose = document.querySelector<HTMLButtonElement>("#settings-close")!;
+const updateBanner = document.querySelector<HTMLDivElement>("#update-banner")!;
+const updateText = document.querySelector<HTMLSpanElement>("#update-text")!;
+const updateInstall = document.querySelector<HTMLButtonElement>("#update-install")!;
+const updateLater = document.querySelector<HTMLButtonElement>("#update-later")!;
+const checkUpdates = document.querySelector<HTMLButtonElement>("#check-updates")!;
+const updateStatus = document.querySelector<HTMLSpanElement>("#update-status")!;
 
 // ---- Formatting ----
 function fmtSize(bytes: number, isDir: boolean): string {
@@ -491,6 +510,52 @@ function closeSettings(): void {
   settingsOverlay.classList.add("hidden");
 }
 
+// ---- Auto-update ----
+let pendingUpdate: Update | null = null;
+
+async function checkForUpdates(manual: boolean): Promise<void> {
+  if (manual) updateStatus.textContent = "Checking…";
+  try {
+    const update = await check();
+    if (update) {
+      pendingUpdate = update;
+      updateText.textContent = `AllTheThings ${update.version} is available.`;
+      updateBanner.classList.remove("hidden");
+      if (manual) updateStatus.textContent = `Update ${update.version} available — see the banner.`;
+    } else {
+      pendingUpdate = null;
+      if (manual) updateStatus.textContent = "You're on the latest version.";
+    }
+  } catch (e) {
+    if (manual) updateStatus.textContent = `Update check failed: ${e}`;
+  }
+}
+
+async function installUpdate(): Promise<void> {
+  if (!pendingUpdate) return;
+  updateBanner.classList.add("hidden");
+  let total = 0;
+  let downloaded = 0;
+  try {
+    await pendingUpdate.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? 0;
+        statusEl.textContent = "Downloading update…";
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        statusEl.textContent = total
+          ? `Downloading update… ${Math.round((downloaded / total) * 100)}%`
+          : "Downloading update…";
+      } else if (event.event === "Finished") {
+        statusEl.textContent = "Installing update…";
+      }
+    });
+    await relaunch();
+  } catch (e) {
+    statusEl.textContent = `Update failed: ${e}`;
+  }
+}
+
 // ---- Events ----
 q.addEventListener("input", () => {
   options.query = q.value;
@@ -555,6 +620,9 @@ rows.addEventListener("contextmenu", (e) => {
 
 gear.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
+updateInstall.addEventListener("click", installUpdate);
+updateLater.addEventListener("click", () => updateBanner.classList.add("hidden"));
+checkUpdates.addEventListener("click", () => checkForUpdates(true));
 setStartup.addEventListener("change", saveSettings);
 setTray.addEventListener("change", saveSettings);
 settingsOverlay.addEventListener("click", (e) => {
@@ -603,3 +671,6 @@ requestAnimationFrame(() =>
     if (!hidden) getCurrentWindow().show().catch(() => {});
   }),
 );
+
+// Check for updates shortly after launch, without blocking the UI.
+window.setTimeout(() => checkForUpdates(false), 4000);

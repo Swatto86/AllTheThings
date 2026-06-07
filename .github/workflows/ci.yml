@@ -42,5 +42,9 @@ jobs:
         run: npm run build
 
       # Full bundle build so a broken installer pipeline fails CI, not a release.
+      # Signing key is needed because the bundle produces updater artifacts.
       - name: Tauri build (full bundle)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: npm run tauri build
