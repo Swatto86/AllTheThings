@@ -17,6 +17,30 @@ struct Run {
     clusters: u64,
 }
 
+/// The `$STANDARD_INFORMATION` timestamps and DOS attributes of one record.
+/// All times are Windows FILETIMEs (`0` when unknown).
+#[derive(Debug, Clone, Copy, Default)]
+struct StdInfo {
+    created_ft: u64,
+    modified_ft: u64,
+    accessed_ft: u64,
+    attributes: u32,
+}
+
+/// Full per-record metadata read on demand for a single MFT record (used by the
+/// USN watcher to enrich live changes, which the journal alone does not carry).
+/// The directory state is carried in `attributes` (the `0x10` bit); the watcher
+/// keeps the journal's own dir flag for the changed link.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordMeta {
+    /// Size in bytes; `None` for directories or when unknown.
+    pub size: Option<u64>,
+    pub modified_ft: u64,
+    pub created_ft: u64,
+    pub accessed_ft: u64,
+    pub attributes: u32,
+}
+
 /// Reads and enumerates the MFT of a single NTFS volume.
 pub struct MftReader {
     volume: Volume,
@@ -77,6 +101,60 @@ impl MftReader {
             record_count,
             runs,
         })
+    }
+
+    /// The underlying volume handle, shared so the USN watcher can issue journal
+    /// control codes without opening a second handle.
+    pub fn volume(&self) -> &Volume {
+        &self.volume
+    }
+
+    /// Absolute byte offset of MFT record `record_no`, or `None` if it lies past
+    /// the table or inside a sparse run (no data on disk).
+    fn record_offset(&self, record_no: u64) -> Option<u64> {
+        if record_no >= self.record_count {
+            return None;
+        }
+        let rec = self.record_size as u64;
+        let cluster = self.bytes_per_cluster as u64;
+        let mut acc: u64 = 0;
+        for run in &self.runs {
+            let recs_in_run = (run.clusters * cluster) / rec;
+            if record_no < acc + recs_in_run {
+                let lcn = run.start_lcn?;
+                return Some(lcn * cluster + (record_no - acc) * rec);
+            }
+            acc += recs_in_run;
+        }
+        None
+    }
+
+    /// Read and parse a single in-use record's timestamps, attributes and size.
+    /// `expected_seq` is the sequence number from the USN file reference (its high
+    /// 16 bits); the read is rejected when the record has since been reused for a
+    /// different file, so stale metadata never attaches to the changed entry.
+    /// Returns `None` if the record is unreadable, free, reused, or not a `FILE`.
+    pub fn read_meta(&self, record_no: u64, expected_seq: u16) -> Option<RecordMeta> {
+        let offset = self.record_offset(record_no)?;
+        let rec_size = self.record_size as usize;
+        // Raw volume reads must be aligned to the logical sector size in both
+        // offset and length, so read the sector window that contains the record
+        // and slice it back out — an MFT record can be smaller than a 4Kn sector.
+        let sector = self.bytes_per_sector as u64;
+        let aligned = offset & !(sector - 1);
+        let pad = (offset - aligned) as usize;
+        let len = (pad + rec_size).next_multiple_of(sector as usize);
+        let mut buf = vec![0u8; len];
+        self.volume.read_at(aligned, &mut buf).ok()?;
+
+        let record = &mut buf[pad..pad + rec_size];
+        apply_fixup(record, self.bytes_per_sector);
+        // Sequence number lives in the FILE header at +0x10; a mismatch means the
+        // record was recycled between the journal event and this read.
+        if read_u16(record, 0x10) != expected_seq {
+            return None;
+        }
+        parse_record_meta(record)
     }
 }
 
@@ -278,7 +356,7 @@ fn parse_file_record(
     names.clear();
     let mut size_from_data: Option<u64> = None;
     let mut size_from_name: Option<u64> = None;
-    let mut modified_ft: u64 = 0;
+    let mut std = StdInfo::default();
 
     let mut off = first_attr;
     while off + 8 <= used {
@@ -295,9 +373,8 @@ fn parse_file_record(
 
         match atype {
             0x10 => {
-                // $STANDARD_INFORMATION — resident; modified time at +0x08.
-                let content = off + read_u16(rec, off + 0x14) as usize;
-                modified_ft = read_u64(rec, content + 0x08);
+                // $STANDARD_INFORMATION — resident; times + DOS attributes.
+                std = read_std_info(rec, off);
             }
             0x30 => {
                 // $FILE_NAME — resident. One per hardlink path.
@@ -320,11 +397,7 @@ fn parse_file_record(
             }
             // $DATA — the unnamed stream gives the file's logical size.
             0x80 if name_len == 0 => {
-                size_from_data = Some(if non_resident == 0 {
-                    read_u32(rec, off + 0x10) as u64
-                } else {
-                    read_u64(rec, off + 0x30)
-                });
+                size_from_data = Some(data_attr_size(rec, off, non_resident));
             }
             _ => {}
         }
@@ -334,11 +407,7 @@ fn parse_file_record(
     if names.is_empty() {
         return;
     }
-    let size = if is_dir {
-        None
-    } else {
-        size_from_data.or(size_from_name)
-    };
+    let size = resolve_size(is_dir, size_from_data, size_from_name);
     for (parent_no, name) in names.drain(..) {
         sink(RawRecord {
             record_no,
@@ -346,9 +415,115 @@ fn parse_file_record(
             name,
             is_dir,
             size,
-            modified_ft,
+            modified_ft: std.modified_ft,
+            created_ft: std.created_ft,
+            accessed_ft: std.accessed_ft,
+            attributes: normalize_attributes(std.attributes, is_dir),
         });
     }
+}
+
+/// Logical size from a `$DATA` (0x80) attribute header: the resident content
+/// length at +0x10, or the non-resident real size at +0x30.
+fn data_attr_size(rec: &[u8], attr_off: usize, non_resident: u8) -> u64 {
+    if non_resident == 0 {
+        read_u32(rec, attr_off + 0x10) as u64
+    } else {
+        read_u64(rec, attr_off + 0x30)
+    }
+}
+
+/// Resolve a record's file size: directories have none; files prefer the `$DATA`
+/// stream size and fall back to the size recorded in `$FILE_NAME`.
+fn resolve_size(is_dir: bool, from_data: Option<u64>, from_name: Option<u64>) -> Option<u64> {
+    if is_dir {
+        None
+    } else {
+        from_data.or(from_name)
+    }
+}
+
+/// Reconcile the DOS-attributes directory bit with the authoritative header
+/// flag: `$STANDARD_INFORMATION` does not reliably carry `FILE_ATTRIBUTE_
+/// DIRECTORY` (0x10), so set it from `is_dir` to match the Win32 view.
+fn normalize_attributes(attrs: u32, is_dir: bool) -> u32 {
+    const DIRECTORY: u32 = 0x10;
+    if is_dir {
+        attrs | DIRECTORY
+    } else {
+        attrs & !DIRECTORY
+    }
+}
+
+/// Decode the `$STANDARD_INFORMATION` (0x10) attribute at `attr_off`: creation
+/// (+0x00), modified (+0x08) and access (+0x18) FILETIMEs, plus DOS attributes
+/// (+0x20). The attribute is always resident; its content offset is at +0x14.
+fn read_std_info(rec: &[u8], attr_off: usize) -> StdInfo {
+    let content = attr_off + read_u16(rec, attr_off + 0x14) as usize;
+    StdInfo {
+        created_ft: read_u64(rec, content),
+        modified_ft: read_u64(rec, content + 0x08),
+        accessed_ft: read_u64(rec, content + 0x18),
+        attributes: read_u32(rec, content + 0x20),
+    }
+}
+
+/// Parse a fixed-up single record into [`RecordMeta`], or `None` if it is not an
+/// in-use `FILE` record. Mirrors the metadata collection in `parse_file_record`
+/// but skips name extraction, which the USN watcher already has.
+fn parse_record_meta(rec: &[u8]) -> Option<RecordMeta> {
+    if rec.len() < 0x30 || &rec[0..4] != b"FILE" {
+        return None;
+    }
+    let flags = read_u16(rec, 0x16);
+    if flags & 0x01 == 0 {
+        return None; // not in use
+    }
+    let is_dir = flags & 0x02 != 0;
+    let used = (read_u32(rec, 0x18) as usize).min(rec.len());
+    let first_attr = read_u16(rec, 0x14) as usize;
+
+    let mut std = StdInfo::default();
+    let mut size_from_data: Option<u64> = None;
+    let mut size_from_name: Option<u64> = None;
+
+    let mut off = first_attr;
+    while off + 8 <= used {
+        let atype = read_u32(rec, off);
+        if atype == 0xFFFF_FFFF {
+            break;
+        }
+        let len = read_u32(rec, off + 4) as usize;
+        if len < 8 || off + len > rec.len() {
+            break;
+        }
+        let non_resident = rec[off + 8];
+        let name_len = rec[off + 9];
+
+        match atype {
+            0x10 => std = read_std_info(rec, off),
+            0x30 => {
+                let content = off + read_u16(rec, off + 0x14) as usize;
+                if content + 0x38 <= rec.len() {
+                    size_from_name = Some(read_u64(rec, content + 0x30));
+                }
+            }
+            0x80 if name_len == 0 => {
+                size_from_data = Some(data_attr_size(rec, off, non_resident));
+            }
+            _ => {}
+        }
+        off += len;
+    }
+
+    let size = resolve_size(is_dir, size_from_data, size_from_name);
+    Some(RecordMeta {
+        size,
+        modified_ft: std.modified_ft,
+        created_ft: std.created_ft,
+        accessed_ft: std.accessed_ft,
+        attributes: normalize_attributes(std.attributes, is_dir),
+    })
 }
 
 #[inline]

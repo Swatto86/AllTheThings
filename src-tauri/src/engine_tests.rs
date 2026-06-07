@@ -92,6 +92,27 @@ fn index_all_volumes_and_search() {
         "size:>100mb returned a folder or small file"
     );
 
+    // attrib: filter — the directory bit is normalized from the record header.
+    let r = catalog.search(&opts("attrib:d"));
+    println!("'attrib:d' -> {} total", r.total);
+    assert!(r.hits.iter().all(|h| h.is_dir), "attrib:d returned a file");
+
+    // Creation/access times are captured by the full scan.
+    let r = catalog.search(&opts("ext:dll"));
+    assert!(
+        r.hits.iter().any(|h| h.created > 0),
+        "no creation times captured"
+    );
+    assert!(
+        r.hits.iter().any(|h| h.accessed > 0),
+        "no access times captured"
+    );
+
+    // dm: date filter compiles and runs against the live index.
+    let r = catalog.search(&opts("dm:>=2000-01-01"));
+    println!("'dm:>=2000-01-01' -> {} total", r.total);
+    assert!(r.total > 0, "date filter returned nothing");
+
     // Full cache round-trip through disk + USN catch-up.
     let drive0 = drives[0];
     let serial = volume_serial(drive0);

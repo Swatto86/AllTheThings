@@ -18,7 +18,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use presentation::commands::{
-    file_icon, get_settings, index_status, open_path, reveal_path, search, set_settings,
+    file_icon, file_type, get_settings, index_status, open_path, reveal_path, search, set_settings,
     start_hidden,
 };
 use presentation::settings::{self, SettingsState, StartFlags};
@@ -80,6 +80,7 @@ pub fn run() {
             open_path,
             reveal_path,
             file_icon,
+            file_type,
             get_settings,
             set_settings,
             start_hidden

@@ -18,6 +18,12 @@ pub struct RawRecord {
     pub size: Option<u64>,
     /// Windows FILETIME (100 ns ticks since 1601-01-01); `0` when unknown.
     pub modified_ft: u64,
+    /// Creation time as a Windows FILETIME; `0` when unknown.
+    pub created_ft: u64,
+    /// Last-access time as a Windows FILETIME; `0` when unknown.
+    pub accessed_ft: u64,
+    /// Windows DOS file attributes bitmask (`FILE_ATTRIBUTE_*`).
+    pub attributes: u32,
 }
 
 /// A source that can enumerate every in-use file record on a volume.

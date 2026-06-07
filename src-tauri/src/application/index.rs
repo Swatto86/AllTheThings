@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::error::IndexResult;
 use crate::application::indexer::{RawRecord, VolumeEnumerator};
-use crate::application::search::{Matcher, SearchOptions, SortKey};
+use crate::application::search::{EntryView, Matcher, SearchOptions, SortKey};
 use crate::domain::{FileEntry, RecordId};
 
 /// NTFS reserves record 5 for the volume root directory.
@@ -39,6 +39,9 @@ pub struct EntrySnapshot {
     pub is_dir: bool,
     pub size: Option<u64>,
     pub modified_ms: Option<i64>,
+    pub created_ms: Option<i64>,
+    pub accessed_ms: Option<i64>,
+    pub attributes: u32,
 }
 
 /// One search result row, serialized to the frontend.
@@ -48,8 +51,14 @@ pub struct Hit {
     pub path: String,
     /// Size in bytes; `-1` for directories or unknown.
     pub size: i64,
-    /// Unix milliseconds; `0` when unknown.
+    /// Last-modified Unix milliseconds; `0` when unknown.
     pub modified: i64,
+    /// Creation Unix milliseconds; `0` when unknown.
+    pub created: i64,
+    /// Last-accessed Unix milliseconds; `0` when unknown.
+    pub accessed: i64,
+    /// Windows DOS file attributes bitmask.
+    pub attributes: u32,
     #[serde(rename = "isDir")]
     pub is_dir: bool,
 }
@@ -145,6 +154,9 @@ impl SearchIndex {
                 is_dir: s.is_dir,
                 size: s.size,
                 modified_ms: s.modified_ms,
+                created_ms: s.created_ms,
+                accessed_ms: s.accessed_ms,
+                attributes: s.attributes,
             })
             .collect();
         Self::finalize(entries, drive)
@@ -161,6 +173,9 @@ impl SearchIndex {
                 is_dir: e.is_dir,
                 size: e.size,
                 modified_ms: e.modified_ms,
+                created_ms: e.created_ms,
+                accessed_ms: e.accessed_ms,
+                attributes: e.attributes,
             })
             .collect()
     }
@@ -221,9 +236,9 @@ impl SearchIndex {
         if matcher.needs_path() {
             let path = self.build_path(idx);
             let lower = path.to_lowercase();
-            matcher.eval(&e.name, &e.name_lower, &path, &lower, e.is_dir, e.size)
+            matcher.eval(&entry_view(e, &path, &lower))
         } else {
-            matcher.eval(&e.name, &e.name_lower, "", "", e.is_dir, e.size)
+            matcher.eval(&entry_view(e, "", ""))
         }
     }
 
@@ -261,6 +276,18 @@ impl SearchIndex {
             SortKey::Modified => {
                 matched.par_sort_unstable_by_key(|&i| {
                     self.entries[i as usize].modified_ms.unwrap_or(0)
+                });
+                self.collect_ranked(matched, opts.ascending, opts.limit)
+            }
+            SortKey::Created => {
+                matched.par_sort_unstable_by_key(|&i| {
+                    self.entries[i as usize].created_ms.unwrap_or(0)
+                });
+                self.collect_ranked(matched, opts.ascending, opts.limit)
+            }
+            SortKey::Accessed => {
+                matched.par_sort_unstable_by_key(|&i| {
+                    self.entries[i as usize].accessed_ms.unwrap_or(0)
                 });
                 self.collect_ranked(matched, opts.ascending, opts.limit)
             }
@@ -324,6 +351,9 @@ impl SearchIndex {
             path,
             size: size_key(e),
             modified: e.modified_ms.unwrap_or(0),
+            created: e.created_ms.unwrap_or(0),
+            accessed: e.accessed_ms.unwrap_or(0),
+            attributes: e.attributes,
             is_dir: e.is_dir,
         }
     }
@@ -380,5 +410,25 @@ fn raw_to_entry(r: RawRecord) -> Option<FileEntry> {
         is_dir: r.is_dir,
         size: r.size,
         modified_ms: filetime_to_unix_ms(r.modified_ft),
+        created_ms: filetime_to_unix_ms(r.created_ft),
+        accessed_ms: filetime_to_unix_ms(r.accessed_ft),
+        attributes: r.attributes,
     })
+}
+
+/// Borrow an entry's fields into the matcher's evaluation view. `path` /
+/// `path_lower` may be empty when no predicate needs the full path.
+fn entry_view<'a>(e: &'a FileEntry, path: &'a str, path_lower: &'a str) -> EntryView<'a> {
+    EntryView {
+        name: &e.name,
+        name_lower: &e.name_lower,
+        path,
+        path_lower,
+        is_dir: e.is_dir,
+        size: e.size,
+        modified_ms: e.modified_ms,
+        created_ms: e.created_ms,
+        accessed_ms: e.accessed_ms,
+        attributes: e.attributes,
+    }
 }

@@ -49,6 +49,11 @@ body,
 /* Resizable / reorderable header cells */
 #head [data-col] {
   position: relative;
+  cursor: pointer;
+  user-select: none;
+}
+#head [data-col].not-sortable {
+  cursor: default;
 }
 #head .grip {
   position: absolute;
@@ -104,6 +109,19 @@ body,
 }
 .menu-pop button:hover {
   background: rgba(96, 165, 250, 0.25);
+}
+.menu-pop button[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+.menu-pop button[disabled]:hover {
+  background: transparent;
+}
+.menu-pop .chk {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  margin-right: 4px;
 }
 .menu-pop .sep {
   height: 1px;

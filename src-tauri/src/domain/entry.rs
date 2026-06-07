@@ -19,4 +19,10 @@ pub struct FileEntry {
     pub size: Option<u64>,
     /// Last-modified time in Unix milliseconds; `None` if unknown.
     pub modified_ms: Option<i64>,
+    /// Creation time in Unix milliseconds; `None` if unknown.
+    pub created_ms: Option<i64>,
+    /// Last-accessed time in Unix milliseconds; `None` if unknown.
+    pub accessed_ms: Option<i64>,
+    /// Windows DOS file attributes bitmask (`FILE_ATTRIBUTE_*`).
+    pub attributes: u32,
 }

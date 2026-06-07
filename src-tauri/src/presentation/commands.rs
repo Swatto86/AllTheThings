@@ -38,6 +38,12 @@ pub fn file_icon(ext: Option<String>, is_dir: bool) -> Option<String> {
     icons::icon_base64(ext.as_deref(), is_dir)
 }
 
+/// The registry's friendly type name for a file extension (or folder).
+#[tauri::command]
+pub fn file_type(ext: Option<String>, is_dir: bool) -> Option<String> {
+    icons::type_name(ext.as_deref(), is_dir)
+}
+
 /// Current user settings, with `run_at_startup` reconciled against the real task.
 #[tauri::command]
 pub fn get_settings(state: State<'_, SettingsState>) -> Settings {

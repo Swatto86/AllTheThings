@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICON
 
 const SHGFI_ICON: u32 = 0x0000_0100;
 const SHGFI_SMALLICON: u32 = 0x0000_0001;
+const SHGFI_TYPENAME: u32 = 0x0000_0400;
 const SHGFI_USEFILEATTRIBUTES: u32 = 0x0000_0010;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
@@ -56,6 +57,44 @@ pub fn icon_base64(ext: Option<&str>, is_dir: bool) -> Option<String> {
     let png = unsafe { icon_to_png(info.hIcon) };
     unsafe { DestroyIcon(info.hIcon) };
     png.map(|bytes| STANDARD.encode(bytes))
+}
+
+/// The registry's friendly type name for an extension (e.g. `"Text Document"`)
+/// or `"File folder"`. Resolved from the extension alone via
+/// `SHGFI_USEFILEATTRIBUTES`, so it touches the registry but never the disk.
+pub fn type_name(ext: Option<&str>, is_dir: bool) -> Option<String> {
+    let name = if is_dir {
+        "folder".to_string()
+    } else {
+        format!("x.{}", ext.unwrap_or("dat"))
+    };
+    let wide: Vec<u16> = name.encode_utf16().chain(once(0)).collect();
+    let attrs = if is_dir {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+
+    let mut info: SHFILEINFOW = unsafe { zeroed() };
+    let res = unsafe {
+        SHGetFileInfoW(
+            wide.as_ptr(),
+            attrs,
+            &mut info,
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    if res == 0 {
+        return None;
+    }
+    let len = info
+        .szTypeName
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(info.szTypeName.len());
+    let label = String::from_utf16_lossy(&info.szTypeName[..len]);
+    (!label.is_empty()).then_some(label)
 }
 
 /// Render an `HICON`'s colour bitmap to a top-down RGBA buffer and PNG-encode it.

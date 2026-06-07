@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::application::EntrySnapshot;
 
 /// Bumped whenever the on-disk layout changes; mismatches are ignored on load.
-const FORMAT_VERSION: u32 = 1;
+/// v2 added per-entry creation/access times and DOS attributes.
+const FORMAT_VERSION: u32 = 2;
 
 /// A persisted per-volume index plus its journal resume point.
 #[derive(Serialize, Deserialize)]

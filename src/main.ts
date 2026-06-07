@@ -11,6 +11,9 @@ interface Hit {
   path: string;
   size: number; // bytes; -1 for directories/unknown
   modified: number; // unix millis; 0 if unknown
+  created: number; // unix millis; 0 if unknown
+  accessed: number; // unix millis; 0 if unknown
+  attributes: number; // FILE_ATTRIBUTE_* bitmask
   isDir: boolean;
 }
 interface SearchResponse {
@@ -26,7 +29,7 @@ interface IndexStatus {
   message: string;
 }
 
-type SortKey = "name" | "path" | "size" | "modified";
+type SortKey = "name" | "path" | "size" | "modified" | "created" | "accessed";
 interface SearchOptions {
   query: string;
   limit: number;
@@ -38,11 +41,21 @@ interface SearchOptions {
   ascending: boolean;
 }
 
-type ColKey = "name" | "path" | "size" | "date";
+type ColKey =
+  | "name"
+  | "path"
+  | "size"
+  | "date"
+  | "created"
+  | "accessed"
+  | "type"
+  | "ext"
+  | "attributes";
 interface Column {
   key: ColKey;
   label: string;
-  sort: SortKey;
+  /** Backend sort column, or `null` for client-only columns (no sorting). */
+  sort: SortKey | null;
   width: number;
   flex: boolean;
 }
@@ -72,12 +85,53 @@ const options: SearchOptions = {
   ascending: true,
 };
 
-let columns: Column[] = [
+// Every column the UI can show. The active set (which, in what order, at what
+// width) is user-chosen via the header right-click picker and persisted.
+const ALL_COLUMNS: readonly Column[] = [
   { key: "name", label: "Name", sort: "name", width: 340, flex: false },
   { key: "path", label: "Path", sort: "path", width: 0, flex: true },
   { key: "size", label: "Size", sort: "size", width: 96, flex: false },
   { key: "date", label: "Date modified", sort: "modified", width: 160, flex: false },
+  { key: "created", label: "Date created", sort: "created", width: 160, flex: false },
+  { key: "accessed", label: "Date accessed", sort: "accessed", width: 160, flex: false },
+  { key: "type", label: "Type", sort: null, width: 150, flex: false },
+  { key: "ext", label: "Ext", sort: null, width: 70, flex: false },
+  { key: "attributes", label: "Attributes", sort: null, width: 96, flex: false },
 ];
+const DEFAULT_COLUMNS: ColKey[] = ["name", "path", "size", "date"];
+const COLUMNS_KEY = "att.columns";
+
+let columns: Column[] = loadColumns();
+
+function colTemplate(key: ColKey): Column {
+  return { ...ALL_COLUMNS.find((c) => c.key === key)! };
+}
+
+function loadColumns(): Column[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(COLUMNS_KEY) ?? "null");
+    if (Array.isArray(saved)) {
+      const cols: Column[] = [];
+      for (const s of saved as { key: ColKey; width?: number }[]) {
+        if (cols.some((c) => c.key === s.key)) continue;
+        const base = ALL_COLUMNS.find((c) => c.key === s.key);
+        if (base) cols.push({ ...base, width: typeof s.width === "number" ? s.width : base.width });
+      }
+      if (cols.some((c) => c.key === "name")) return cols;
+    }
+  } catch {
+    /* fall through to defaults */
+  }
+  return DEFAULT_COLUMNS.map(colTemplate);
+}
+
+function saveColumns(): void {
+  try {
+    localStorage.setItem(COLUMNS_KEY, JSON.stringify(columns.map((c) => ({ key: c.key, width: c.width }))));
+  } catch {
+    /* storage unavailable */
+  }
+}
 
 let hits: Hit[] = [];
 let total = 0;
@@ -126,6 +180,7 @@ app.innerHTML = /* html */ `
     <div id="status" class="text-xs px-2 py-1 border-t border-base-300 bg-base-200 opacity-80"></div>
   </div>
   <div id="menu" class="menu-pop hidden"></div>
+  <div id="col-menu" class="menu-pop hidden"></div>
   <div id="history-menu" class="menu-pop hidden"></div>
   <div id="settings-overlay" class="overlay hidden">
     <div class="settings-panel">
@@ -156,6 +211,7 @@ const rows = document.querySelector<HTMLDivElement>("#rows")!;
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const head = document.querySelector<HTMLDivElement>("#head")!;
 const menu = document.querySelector<HTMLDivElement>("#menu")!;
+const colMenu = document.querySelector<HTMLDivElement>("#col-menu")!;
 const sizeBtn = document.querySelector<HTMLButtonElement>("#sizebtn")!;
 const sizeMenu = document.querySelector<HTMLDivElement>("#sizemenu")!;
 const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
@@ -202,6 +258,28 @@ function extOf(name: string): string {
   return i > 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
+// FILE_ATTRIBUTE_* bits → Explorer-style letters, in display order.
+const ATTR_LETTERS: [number, string][] = [
+  [0x1, "R"], // readonly
+  [0x2, "H"], // hidden
+  [0x4, "S"], // system
+  [0x20, "A"], // archive
+  [0x10, "D"], // directory
+  [0x400, "L"], // reparse point
+  [0x200, "P"], // sparse
+  [0x800, "C"], // compressed
+  [0x4000, "E"], // encrypted
+  [0x100, "T"], // temporary
+  [0x1000, "O"], // offline
+  [0x2000, "I"], // not content indexed
+];
+
+function fmtAttribs(attrs: number): string {
+  let s = "";
+  for (const [bit, ch] of ATTR_LETTERS) if (attrs & bit) s += ch;
+  return s;
+}
+
 function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
@@ -221,7 +299,7 @@ function computeHighlightTerms(query: string, regex: boolean): string[] {
     let tok = m[2];
     if (tok === "|" || tok.startsWith("!")) continue;
     const lower = tok.toLowerCase();
-    if (/^(ext|size|file|files|folder|folders|dir):/.test(lower)) continue;
+    if (/^(ext|size|file|files|folder|folders|dir|dm|dc|da|attrib):/.test(lower)) continue;
     if (lower.startsWith("path:")) tok = tok.slice(5);
     if (!tok || tok.includes("*") || tok.includes("?")) continue;
     terms.push(tok.toLowerCase());
@@ -294,6 +372,34 @@ function iconHtml(h: Hit): string {
   return `${h.isDir ? "📁" : "📄"} `;
 }
 
+// ---- Type names (registry-resolved, cached per extension like icons) ----
+const typeCache = new Map<string, string>(); // key -> friendly type name
+const typePending = new Set<string>();
+
+function typeKey(h: Hit): string {
+  return h.isDir ? "dir" : extOf(h.name) || "file";
+}
+
+function ensureType(h: Hit): void {
+  const key = typeKey(h);
+  if (typeCache.has(key) || typePending.has(key)) return;
+  typePending.add(key);
+  invoke<string | null>("file_type", { ext: h.isDir ? null : extOf(h.name), isDir: h.isDir })
+    .then((t) => {
+      typeCache.set(key, t ?? "");
+      if (t) queueIconRerender();
+    })
+    .catch(() => typeCache.set(key, ""))
+    .finally(() => typePending.delete(key));
+}
+
+function typeLabel(h: Hit): string {
+  const cached = typeCache.get(typeKey(h));
+  if (cached !== undefined) return cached;
+  ensureType(h);
+  return ""; // filled in on the next render once resolved
+}
+
 // ---- Table ----
 function setCols(): void {
   const tmpl = columns.map((c) => (c.flex ? "minmax(140px,1fr)" : `${c.width}px`)).join(" ");
@@ -310,16 +416,27 @@ function cellHtml(h: Hit, key: ColKey): string {
       return `<div class="text-right pr-2 opacity-80">${fmtSize(h.size, h.isDir)}</div>`;
     case "date":
       return `<div class="opacity-70">${fmtDate(h.modified)}</div>`;
+    case "created":
+      return `<div class="opacity-70">${fmtDate(h.created)}</div>`;
+    case "accessed":
+      return `<div class="opacity-70">${fmtDate(h.accessed)}</div>`;
+    case "type":
+      return `<div class="opacity-70" title="${esc(typeLabel(h))}">${esc(typeLabel(h))}</div>`;
+    case "ext":
+      return `<div class="opacity-70">${esc(h.isDir ? "" : extOf(h.name))}</div>`;
+    case "attributes":
+      return `<div class="opacity-70 font-mono">${fmtAttribs(h.attributes)}</div>`;
   }
 }
 
 function renderHeader(): void {
   head.innerHTML = columns
     .map((c) => {
-      const ind = c.sort === options.sort ? (options.ascending ? " ▲" : " ▼") : "";
+      const ind = c.sort && c.sort === options.sort ? (options.ascending ? " ▲" : " ▼") : "";
       const grip = c.flex ? "" : `<span class="grip" data-grip="${c.key}"></span>`;
       const align = c.key === "size" ? "text-right pr-2" : "";
-      return `<div data-col="${c.key}" draggable="true" class="${align}">${c.label}<span class="ind">${ind}</span>${grip}</div>`;
+      const sortable = c.sort ? "" : " not-sortable";
+      return `<div data-col="${c.key}" draggable="true" class="${align}${sortable}">${c.label}<span class="ind">${ind}</span>${grip}</div>`;
     })
     .join("");
   wireHeader();
@@ -347,6 +464,7 @@ function wireHeader(): void {
 
     cell.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("grip") || resizing) return;
+      if (!col.sort) return; // client-only column — not sortable
       if (options.sort === col.sort) options.ascending = !options.ascending;
       else {
         options.sort = col.sort;
@@ -388,6 +506,7 @@ function moveColumn(src: ColKey, target: ColKey): void {
   if (from < 0 || to < 0) return;
   const [col] = columns.splice(from, 1);
   columns.splice(to, 0, col);
+  saveColumns();
   setCols();
   renderHeader();
   renderVisible();
@@ -408,10 +527,60 @@ function startResize(e: PointerEvent, key: ColKey): void {
   const up = () => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    saveColumns();
     setTimeout(() => (resizing = false), 0);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+}
+
+// ---- Column picker (header right-click) ----
+function showColumnPicker(x: number, y: number): void {
+  refreshColumnPicker();
+  colMenu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
+  colMenu.style.top = `${Math.min(y, window.innerHeight - ALL_COLUMNS.length * 30)}px`;
+  colMenu.classList.remove("hidden");
+}
+
+function refreshColumnPicker(): void {
+  const visible = new Set(columns.map((c) => c.key));
+  colMenu.innerHTML = ALL_COLUMNS.map((c) => {
+    const on = visible.has(c.key);
+    const locked = c.key === "name";
+    return `<button data-ck="${c.key}"${locked ? " disabled" : ""}><span class="chk">${on ? "✓" : ""}</span>${esc(c.label)}</button>`;
+  }).join("");
+  colMenu.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+    b.onclick = (e) => {
+      // refreshColumnPicker() replaces these buttons, detaching the click
+      // target; without this the bubbling click would hit the window dismiss
+      // handler and close the picker after a single toggle.
+      e.stopPropagation();
+      toggleColumn(b.dataset.ck as ColKey);
+    };
+  });
+}
+
+function toggleColumn(key: ColKey): void {
+  if (key === "name") return; // Name is mandatory.
+  const idx = columns.findIndex((c) => c.key === key);
+  let sortChanged = false;
+  if (idx >= 0) {
+    // Hiding the active sort column falls back to Name-ascending.
+    if (columns[idx].sort && columns[idx].sort === options.sort) {
+      options.sort = "name";
+      options.ascending = true;
+      sortChanged = true;
+    }
+    columns.splice(idx, 1);
+  } else {
+    columns.push(colTemplate(key));
+  }
+  saveColumns();
+  setCols();
+  renderHeader();
+  refreshColumnPicker();
+  if (sortChanged) runSearch();
+  else renderVisible();
 }
 
 // ---- Search ----
@@ -680,11 +849,18 @@ viewport.addEventListener(
   "scroll",
   () => {
     hideMenu();
+    colMenu.classList.add("hidden");
     renderVisible();
   },
   { passive: true },
 );
 window.addEventListener("resize", renderVisible);
+
+head.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  hideMenu();
+  showColumnPicker(e.clientX, e.clientY);
+});
 
 document.querySelectorAll<HTMLButtonElement>(".opt").forEach((b) => {
   b.addEventListener("click", () => {
@@ -746,12 +922,14 @@ listen("open-settings", openSettings);
 
 window.addEventListener("click", (e) => {
   if (!menu.contains(e.target as Node)) hideMenu();
+  if (!colMenu.contains(e.target as Node)) colMenu.classList.add("hidden");
   if (e.target !== sizeBtn && !sizeMenu.contains(e.target as Node)) sizeMenu.classList.add("hidden");
   if (e.target !== q && !historyMenu.contains(e.target as Node)) hideHistory();
 });
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     hideMenu();
+    colMenu.classList.add("hidden");
     sizeMenu.classList.add("hidden");
     hideHistory();
     closeSettings();

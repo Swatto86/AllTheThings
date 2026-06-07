@@ -80,6 +80,8 @@ fn sort_hits(hits: &mut [Hit], opts: &SearchOptions) {
         SortKey::Path => hits.sort_by_key(|h| h.path.to_lowercase()),
         SortKey::Size => hits.sort_by_key(|h| h.size),
         SortKey::Modified => hits.sort_by_key(|h| h.modified),
+        SortKey::Created => hits.sort_by_key(|h| h.created),
+        SortKey::Accessed => hits.sort_by_key(|h| h.accessed),
     }
     if !opts.ascending {
         hits.reverse();

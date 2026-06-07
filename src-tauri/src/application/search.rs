@@ -4,10 +4,12 @@
 //! AND-combined, `|` is OR, `!` negates the following term, and `"quoted"`
 //! text is a literal phrase (escaping the operators). `*`/`?` wildcards,
 //! whole-word and regex modes, case sensitivity, full-path matching, and the
-//! `ext:`, `path:`, `file:`, `folder:`, `size:` functions are all supported as
-//! leaf predicates, so e.g. `ext:dll | ext:exe`, `report !draft`, and
-//! `"my file" size:>1mb` all work.
+//! `ext:`, `path:`, `file:`, `folder:`, `size:`, `dm:`/`dc:`/`da:` (modified /
+//! created / accessed dates) and `attrib:` functions are all supported as leaf
+//! predicates, so e.g. `ext:dll | ext:exe`, `report !draft`, `"my file"
+//! size:>1mb`, `dm:today`, `dc:2024-01-01..2024-06-30` and `attrib:h` all work.
 
+use chrono::{Datelike, Days, Local, Months, NaiveDate, TimeZone};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 
@@ -20,6 +22,24 @@ pub enum SortKey {
     Path,
     Size,
     Modified,
+    Created,
+    Accessed,
+}
+
+/// The entry fields a [`Matcher`] inspects. `path` / `path_lower` may be empty
+/// strings when [`Matcher::needs_path`] is false. Borrowed, so building one per
+/// candidate entry allocates nothing.
+pub struct EntryView<'a> {
+    pub name: &'a str,
+    pub name_lower: &'a str,
+    pub path: &'a str,
+    pub path_lower: &'a str,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub modified_ms: Option<i64>,
+    pub created_ms: Option<i64>,
+    pub accessed_ms: Option<i64>,
+    pub attributes: u32,
 }
 
 /// Everything-style search options sent from the UI.
@@ -58,6 +78,20 @@ struct SizeFilter {
     max: Option<u64>,
 }
 
+/// Which timestamp a date predicate tests.
+#[derive(Clone, Copy)]
+enum DateField {
+    Modified,
+    Created,
+    Accessed,
+}
+
+/// Inclusive Unix-millisecond bounds from a `dm:`/`dc:`/`da:` operator.
+struct DateFilter {
+    min: Option<i64>,
+    max: Option<i64>,
+}
+
 /// Whether a text predicate matches the file name or the full path.
 #[derive(Clone, Copy)]
 enum TextTarget {
@@ -74,9 +108,18 @@ enum TextKind {
 
 /// A single test against one entry.
 enum Pred {
-    Text { target: TextTarget, kind: TextKind },
+    Text {
+        target: TextTarget,
+        kind: TextKind,
+    },
     Ext(Vec<String>),
     Size(SizeFilter),
+    Date {
+        field: DateField,
+        filter: DateFilter,
+    },
+    /// All bits in the mask must be set in the entry's attributes.
+    Attrib(u32),
     File,
     Folder,
 }
@@ -190,50 +233,39 @@ impl Matcher {
         self.needs_path
     }
 
-    /// Test one entry. `path`/`path_lower` may be empty when `needs_path()` is
-    /// false (no predicate looks at the path).
-    #[allow(clippy::too_many_arguments)]
-    pub fn eval(
-        &self,
-        name: &str,
-        name_lower: &str,
-        path: &str,
-        path_lower: &str,
-        is_dir: bool,
-        size: Option<u64>,
-    ) -> bool {
+    /// Test one entry. `e.path`/`e.path_lower` may be empty when `needs_path()`
+    /// is false (no predicate looks at the path).
+    pub fn eval(&self, e: &EntryView) -> bool {
         if self.clauses.is_empty() {
             return true;
         }
         self.clauses.iter().any(|conj| {
             conj.leaves.iter().all(|leaf| {
-                let hit =
-                    self.eval_pred(&leaf.pred, name, name_lower, path, path_lower, is_dir, size);
+                let hit = self.eval_pred(&leaf.pred, e);
                 hit ^ leaf.negate
             })
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn eval_pred(
-        &self,
-        pred: &Pred,
-        name: &str,
-        name_lower: &str,
-        path: &str,
-        path_lower: &str,
-        is_dir: bool,
-        size: Option<u64>,
-    ) -> bool {
+    fn eval_pred(&self, pred: &Pred, e: &EntryView) -> bool {
         match pred {
-            Pred::File => !is_dir,
-            Pred::Folder => is_dir,
-            Pred::Ext(list) => ext_allows(name_lower, list),
-            Pred::Size(filter) => !is_dir && size_within(size, filter),
+            Pred::File => !e.is_dir,
+            Pred::Folder => e.is_dir,
+            Pred::Ext(list) => ext_allows(e.name_lower, list),
+            Pred::Size(filter) => !e.is_dir && size_within(e.size, filter),
+            Pred::Date { field, filter } => {
+                let value = match field {
+                    DateField::Modified => e.modified_ms,
+                    DateField::Created => e.created_ms,
+                    DateField::Accessed => e.accessed_ms,
+                };
+                date_within(value, filter)
+            }
+            Pred::Attrib(mask) => e.attributes & mask == *mask,
             Pred::Text { target, kind } => {
                 let (orig, lower) = match target {
-                    TextTarget::Name => (name, name_lower),
-                    TextTarget::Path => (path, path_lower),
+                    TextTarget::Name => (e.name, e.name_lower),
+                    TextTarget::Path => (e.path, e.path_lower),
                 };
                 match kind {
                     TextKind::Plain(needle) => {
@@ -323,6 +355,18 @@ fn parse_word(
     }
     if let Some(v) = word.strip_prefix("size:") {
         return Ok(parse_size_filter(v).map(Pred::Size));
+    }
+    if let Some(v) = word.strip_prefix("dm:") {
+        return Ok(date_pred(v, DateField::Modified));
+    }
+    if let Some(v) = word.strip_prefix("dc:") {
+        return Ok(date_pred(v, DateField::Created));
+    }
+    if let Some(v) = word.strip_prefix("da:") {
+        return Ok(date_pred(v, DateField::Accessed));
+    }
+    if let Some(v) = word.strip_prefix("attrib:") {
+        return Ok(parse_attrib(v).map(Pred::Attrib));
     }
     if let Some(v) = word.strip_prefix("path:") {
         *needs_path = true;
@@ -493,6 +537,179 @@ fn parse_size_bytes(s: &str) -> Option<u64> {
     Some((value * multiplier) as u64)
 }
 
+/// Build a date predicate, or `None` if the value is unparseable.
+fn date_pred(value: &str, field: DateField) -> Option<Pred> {
+    parse_date_filter(value).map(|filter| Pred::Date { field, filter })
+}
+
+/// Parse a `dm:`/`dc:`/`da:` value into inclusive millisecond bounds. Accepts a
+/// keyword (`today`, `yesterday`, `thisweek`/`lastweek`, `thismonth`/
+/// `lastmonth`, `thisyear`/`lastyear`), an absolute `YYYY`, `YYYY-MM` or
+/// `YYYY-MM-DD` (`/` also allowed), each optionally prefixed by `>`/`>=`/`<`/
+/// `<=`/`=`, or an inclusive `A..B` range.
+fn parse_date_filter(value: &str) -> Option<DateFilter> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((a, b)) = value.split_once("..") {
+        let (start, _) = parse_date_span(a)?;
+        let (_, end) = parse_date_span(b)?;
+        return Some(DateFilter {
+            min: Some(start),
+            max: Some(end - 1),
+        });
+    }
+    let (op, rest) = split_date_op(value);
+    let (start, end) = parse_date_span(rest)?;
+    Some(match op {
+        ">" => DateFilter {
+            min: Some(end),
+            max: None,
+        },
+        ">=" => DateFilter {
+            min: Some(start),
+            max: None,
+        },
+        "<" => DateFilter {
+            min: None,
+            max: Some(start - 1),
+        },
+        "<=" => DateFilter {
+            min: None,
+            max: Some(end - 1),
+        },
+        _ => DateFilter {
+            min: Some(start),
+            max: Some(end - 1),
+        },
+    })
+}
+
+fn split_date_op(value: &str) -> (&str, &str) {
+    for op in [">=", "<=", ">", "<", "="] {
+        if let Some(rest) = value.strip_prefix(op) {
+            return (op, rest);
+        }
+    }
+    ("", value)
+}
+
+/// Resolve a date keyword or absolute date into a half-open local-time span
+/// `[start, end)` in Unix milliseconds.
+fn parse_date_span(s: &str) -> Option<(i64, i64)> {
+    let s = s.trim().to_ascii_lowercase();
+    let today = Local::now().date_naive();
+
+    match s.as_str() {
+        "today" => return span_days(today, today.checked_add_days(Days::new(1))?),
+        "yesterday" => return span_days(today.checked_sub_days(Days::new(1))?, today),
+        "thisweek" | "lastweek" => {
+            let monday =
+                today.checked_sub_days(Days::new(today.weekday().num_days_from_monday() as u64))?;
+            return if s == "thisweek" {
+                span_days(monday, monday.checked_add_days(Days::new(7))?)
+            } else {
+                span_days(monday.checked_sub_days(Days::new(7))?, monday)
+            };
+        }
+        "thismonth" | "lastmonth" => {
+            let first = today.with_day(1)?;
+            return if s == "thismonth" {
+                span_days(first, first.checked_add_months(Months::new(1))?)
+            } else {
+                span_days(first.checked_sub_months(Months::new(1))?, first)
+            };
+        }
+        "thisyear" | "lastyear" => {
+            let jan1 = NaiveDate::from_ymd_opt(today.year(), 1, 1)?;
+            return if s == "thisyear" {
+                span_days(jan1, NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)?)
+            } else {
+                span_days(NaiveDate::from_ymd_opt(today.year() - 1, 1, 1)?, jan1)
+            };
+        }
+        _ => {}
+    }
+
+    let parts: Vec<&str> = s.split(['-', '/']).collect();
+    match parts.as_slice() {
+        [y] => {
+            let year: i32 = y.parse().ok()?;
+            span_days(
+                NaiveDate::from_ymd_opt(year, 1, 1)?,
+                NaiveDate::from_ymd_opt(year.checked_add(1)?, 1, 1)?,
+            )
+        }
+        [y, m] => {
+            let first = NaiveDate::from_ymd_opt(y.parse().ok()?, m.parse().ok()?, 1)?;
+            span_days(first, first.checked_add_months(Months::new(1))?)
+        }
+        [y, m, d] => {
+            let date = NaiveDate::from_ymd_opt(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?)?;
+            span_days(date, date.checked_add_days(Days::new(1))?)
+        }
+        _ => None,
+    }
+}
+
+/// Convert a `[start, end)` date range (end exclusive) to Unix milliseconds at
+/// local midnight.
+fn span_days(start: NaiveDate, end: NaiveDate) -> Option<(i64, i64)> {
+    Some((local_midnight_ms(start)?, local_midnight_ms(end)?))
+}
+
+/// Unix milliseconds at local-time midnight of `date`.
+fn local_midnight_ms(date: NaiveDate) -> Option<i64> {
+    let naive = date.and_hms_opt(0, 0, 0)?;
+    Some(
+        Local
+            .from_local_datetime(&naive)
+            .earliest()?
+            .timestamp_millis(),
+    )
+}
+
+fn date_within(value: Option<i64>, filter: &DateFilter) -> bool {
+    let Some(ms) = value else {
+        return false; // unknown dates never satisfy a date filter
+    };
+    if filter.min.is_some_and(|m| ms < m) {
+        return false;
+    }
+    if filter.max.is_some_and(|m| ms > m) {
+        return false;
+    }
+    true
+}
+
+/// Parse an `attrib:` value (a run of attribute letters) into a bitmask that the
+/// entry must have fully set. Unknown letters are ignored; an empty mask yields
+/// `None` so the predicate is dropped rather than matching everything.
+fn parse_attrib(value: &str) -> Option<u32> {
+    let mut mask = 0u32;
+    for c in value.chars() {
+        mask |= match c.to_ascii_lowercase() {
+            'r' => 0x0000_0001, // readonly
+            'h' => 0x0000_0002, // hidden
+            's' => 0x0000_0004, // system
+            'd' => 0x0000_0010, // directory
+            'a' => 0x0000_0020, // archive
+            'n' => 0x0000_0080, // normal
+            't' => 0x0000_0100, // temporary
+            'p' => 0x0000_0200, // sparse file
+            'l' => 0x0000_0400, // reparse point
+            'c' => 0x0000_0800, // compressed
+            'o' => 0x0000_1000, // offline
+            'i' => 0x0000_2000, // not content indexed
+            'e' => 0x0000_4000, // encrypted
+            'v' => 0x0001_0000, // virtual
+            _ => continue,
+        };
+    }
+    (mask != 0).then_some(mask)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,8 +722,40 @@ mod tests {
         .unwrap()
     }
 
+    fn view<'a>(
+        name: &'a str,
+        name_lower: &'a str,
+        is_dir: bool,
+        size: Option<u64>,
+    ) -> EntryView<'a> {
+        EntryView {
+            name,
+            name_lower,
+            path: "",
+            path_lower: "",
+            is_dir,
+            size,
+            modified_ms: None,
+            created_ms: None,
+            accessed_ms: None,
+            attributes: 0,
+        }
+    }
+
     fn hits(m: &Matcher, name: &str, is_dir: bool, size: Option<u64>) -> bool {
-        m.eval(name, &name.to_lowercase(), "", "", is_dir, size)
+        m.eval(&view(name, &name.to_lowercase(), is_dir, size))
+    }
+
+    fn eval_attr(m: &Matcher, attributes: u32) -> bool {
+        let mut v = view("x", "x", false, None);
+        v.attributes = attributes;
+        m.eval(&v)
+    }
+
+    fn eval_modified(m: &Matcher, modified_ms: Option<i64>) -> bool {
+        let mut v = view("x", "x", false, None);
+        v.modified_ms = modified_ms;
+        m.eval(&v)
     }
 
     #[test]
@@ -559,5 +808,63 @@ mod tests {
         let m = matcher("");
         assert!(m.matches_all());
         assert!(hits(&m, "anything", false, None));
+    }
+
+    #[test]
+    fn attrib_requires_all_listed_bits() {
+        let m = matcher("attrib:h");
+        assert!(eval_attr(&m, 0x2)); // hidden
+        assert!(eval_attr(&m, 0x2 | 0x20)); // hidden + archive
+        assert!(!eval_attr(&m, 0x20)); // archive only
+
+        let m = matcher("attrib:hs");
+        assert!(eval_attr(&m, 0x2 | 0x4)); // hidden + system
+        assert!(!eval_attr(&m, 0x2)); // hidden but not system
+    }
+
+    #[test]
+    fn date_filters_use_inclusive_bounds() {
+        // 2024-06-15T12:00:00Z — months from any year boundary, so timezone
+        // offset can't move it across the asserted edges.
+        let ms = Some(1_718_452_800_000);
+
+        assert!(eval_modified(&matcher("dm:>=2024-01-01"), ms));
+        assert!(!eval_modified(&matcher("dm:<2024-01-01"), ms));
+        assert!(eval_modified(&matcher("dm:2024-01-01..2024-12-31"), ms));
+        assert!(eval_modified(&matcher("dm:2024"), ms));
+        assert!(!eval_modified(&matcher("dm:2023"), ms));
+    }
+
+    #[test]
+    fn unknown_date_never_matches() {
+        assert!(!eval_modified(&matcher("dm:>=2000"), None));
+    }
+
+    #[test]
+    fn out_of_range_year_is_dropped_not_panicking() {
+        // Years past chrono's range (and i32::MAX, which would overflow `year+1`)
+        // must drop the term rather than panic.
+        assert!(matcher("dm:2147483647").matches_all());
+        assert!(matcher("dm:>=999999999").matches_all());
+        assert!(matcher("dm:2147483647..2147483647").matches_all());
+    }
+
+    #[test]
+    fn date_keywords_parse() {
+        // Relative keywords depend on "now"; assert only that they compile to a
+        // usable predicate (not dropped) rather than a specific instant.
+        for kw in [
+            "today",
+            "yesterday",
+            "thisweek",
+            "lastweek",
+            "thismonth",
+            "lastmonth",
+            "thisyear",
+            "lastyear",
+        ] {
+            let m = matcher(&format!("dm:{kw}"));
+            assert!(!m.matches_all(), "dm:{kw} should be a real predicate");
+        }
     }
 }

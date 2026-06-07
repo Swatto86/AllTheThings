@@ -17,12 +17,12 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Hardlink-aware**: a file appears at every path it is linked from (e.g. `System32\ntoskrnl.exe` and its WinSxS hardlinks).
 - **Persistent index cache**: the index is saved to `%LOCALAPPDATA%\AllTheThings\cache`; subsequent launches load it instantly and replay only USN changes since (full rescan only if the journal was recreated or its tail purged).
 - **No white flash on launch**: the window is shown only after the dark UI has painted.
-- **Query syntax**: AND (space), **OR** (`|`), **NOT** (`!`), `"quoted phrases"`, `*`/`?` wildcards, regex, and `ext:`/`path:`/`file:`/`folder:`/`size:` functions (e.g. `ext:dll | ext:exe`, `report !draft size:>1mb`).
+- **Query syntax**: AND (space), **OR** (`|`), **NOT** (`!`), `"quoted phrases"`, `*`/`?` wildcards, regex, and `ext:`/`path:`/`file:`/`folder:`/`size:`/`dm:`/`dc:`/`da:`/`attrib:` functions (e.g. `ext:dll | ext:exe`, `report !draft size:>1mb`, `dm:thisweek`, `dc:2024-01-01..2024-06-30`, `attrib:h`). The date functions filter by **m**odified / **c**reated / **a**ccessed time and accept keywords (`today`, `yesterday`, `thisweek`/`thismonth`/`thisyear`, …), `YYYY[-MM[-DD]]` dates, `>`/`>=`/`<`/`<=` comparisons, and `A..B` ranges.
 - **Matched-text highlighting** in results, and a **recent-searches** history dropdown.
 - **Toggles** (toolbar): match case, whole word, regular expression, match full path.
 - **Size filter** dropdown: Empty / Tiny / Small / Medium / Large / Huge / Gigantic presets (inserts the matching `size:` range).
 - **Shell file-type icons** — the real Windows icon per extension/folder, fetched on demand and cached.
-- **Sortable, resizable, reorderable columns** — click a header to sort (again to reverse), drag the edge to resize, drag the header to reorder.
+- **Sortable, resizable, reorderable columns** — click a header to sort (again to reverse), drag the edge to resize, drag the header to reorder. **Right-click a header** to pick columns: Name, Path, Size, Date modified/created/accessed, Type (registry file-type name), Ext, and Attributes; the layout is remembered.
 - **Right-click**: open, open containing folder (Explorer with the item selected), copy full path, copy name.
 - **Single-instance**: launching again focuses the running window.
 - **System tray**: minimise/close to tray; Show / Settings / Quit menu; left-click to restore.
@@ -35,7 +35,7 @@ See [**docs/PARITY.md**](docs/PARITY.md) for a full feature-by-feature compariso
 
 ## Status
 
-Working build with daily-driver parity. Files created after the initial scan show a blank size until the next full index (the USN journal carries no size field).
+Working build with daily-driver parity. The USN journal carries no size or full timestamps, so the live watcher re-reads each changed file's MFT record to fill in size, creation/modified/access times, and attributes — files created or renamed after the initial scan show complete metadata immediately.
 
 ## Download & install
 
@@ -57,7 +57,7 @@ The MFT/USN engine has a live integration test, ignored by default. Run it from 
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture --test-threads=1
 ```
 
-It indexes every NTFS volume and checks hardlink paths, wildcards, and the `ext:`/`folder:`/`size:` operators.
+It indexes every NTFS volume and checks hardlink paths, wildcards, the `ext:`/`folder:`/`size:`/`attrib:` operators, the `dm:` date filter, and the cache round-trip.
 
 ## Run
 
@@ -124,15 +124,17 @@ test enumerator can be substituted without touching application logic.
 2. `MftReader::open` reads the NTFS boot sector for geometry, then reads `$MFT`
    record 0 to follow the table's own data runs across the disk.
 3. `enumerate` streams every in-use `FILE` record, applying update-sequence
-   fixups and extracting the Win32 name(s), parent reference, size, and
-   timestamp — one entry per hardlink path.
+   fixups and extracting the Win32 name(s), parent reference, size, the
+   creation/modified/access timestamps and DOS attributes (from
+   `$STANDARD_INFORMATION`) — one entry per hardlink path.
 4. Each volume's `SearchIndex` holds entries in memory (with a precomputed
    name-sorted view for the instant browse-all default) and reconstructs full
    paths on demand by walking parent references to the root directory (record 5).
 5. `Catalog` fans a query across volumes in parallel via a compiled `Matcher`
    and merges the ranked results.
 6. A per-volume `UsnWatcher` tails the USN journal and applies
-   create/delete/rename events to the live index.
+   create/delete/rename events to the live index, re-reading each changed
+   record's MFT entry to fill in the size and timestamps the journal omits.
 7. On startup, if a valid cached snapshot exists, it is loaded instantly and
    `catch_up` replays journal changes since the saved position; a full MFT scan
    runs only when the journal was recreated or its tail purged. The cache is

@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 
 use crate::application::{Catalog, RawRecord, SearchIndex};
 
+use super::mft::MftReader;
 use super::volume::Volume;
 
 // FSCTL control codes (CTL_CODE for the USN journal operations).
@@ -113,10 +114,22 @@ pub fn catch_up(
     from_usn: i64,
     index: &mut SearchIndex,
 ) -> CatchUp {
-    let Ok(volume) = Volume::open(drive) else {
-        return CatchUp::Stale;
+    // Prefer an MftReader so replayed changes can be enriched with the full
+    // metadata the journal omits; fall back to a journal-only handle if the MFT
+    // can't be opened, so a replay still beats a full rescan.
+    let reader = MftReader::open(drive).ok();
+    let fallback;
+    let volume: &Volume = match reader.as_ref() {
+        Some(r) => r.volume(),
+        None => match Volume::open(drive) {
+            Ok(v) => {
+                fallback = v;
+                &fallback
+            }
+            Err(_) => return CatchUp::Stale,
+        },
     };
-    let Ok(state) = query_journal(&volume) else {
+    let Ok(state) = query_journal(volume) else {
         return CatchUp::Stale;
     };
     // A new journal id or a purged resume point means we cannot trust a replay.
@@ -150,7 +163,7 @@ pub fn catch_up(
 
         let next = i64::from_le_bytes(out[0..8].try_into().unwrap());
         if returned > 8 {
-            for op in parse_records(&out[..returned]) {
+            for op in parse_records(&out[..returned], reader.as_ref()) {
                 apply_op(index, op);
             }
         }
@@ -202,8 +215,20 @@ fn run(
     stop: &AtomicBool,
     start_usn: Option<i64>,
 ) -> Result<(), u32> {
-    let volume = Volume::open(drive).map_err(|_| 0u32)?;
-    let state = query_journal(&volume)?;
+    // Keep an MftReader open for the watcher's lifetime so each live change can
+    // be enriched with the timestamps/size the journal doesn't carry; share its
+    // volume handle for the journal reads. Fall back to a journal-only handle if
+    // the MFT can't be opened.
+    let reader = MftReader::open(drive).ok();
+    let fallback;
+    let volume: &Volume = match reader.as_ref() {
+        Some(r) => r.volume(),
+        None => {
+            fallback = Volume::open(drive).map_err(|_| 0u32)?;
+            &fallback
+        }
+    };
+    let state = query_journal(volume)?;
 
     let journal_id = state.journal_id;
     let mut next_usn = start_usn.unwrap_or(state.next_usn);
@@ -234,7 +259,7 @@ fn run(
         next_usn = i64::from_le_bytes(out[0..8].try_into().unwrap());
 
         let ops = if returned > 8 {
-            parse_records(&out[..returned])
+            parse_records(&out[..returned], reader.as_ref())
         } else {
             // Nothing new — back off before polling again.
             thread::sleep(Duration::from_millis(400));
@@ -253,8 +278,10 @@ fn run(
     Ok(())
 }
 
-/// Parse the USN_RECORD_V2 entries that follow the leading 8-byte next-USN.
-fn parse_records(buf: &[u8]) -> Vec<Op> {
+/// Parse the USN_RECORD_V2 entries that follow the leading 8-byte next-USN. When
+/// `reader` is available each upsert is enriched from the live MFT record with
+/// the size and creation/modified/access times the journal does not carry.
+fn parse_records(buf: &[u8], reader: Option<&MftReader>) -> Vec<Op> {
     let mut ops = Vec::new();
     let mut p = 8usize;
 
@@ -275,6 +302,9 @@ fn parse_records(buf: &[u8]) -> Vec<Op> {
         // Act only on the coalesced final (close) event for each change.
         if reason & USN_REASON_CLOSE != 0 {
             let record_no = file_ref & RECORD_MASK;
+            // High 16 bits of the reference are the record's sequence number,
+            // used to detect MFT-record reuse when re-reading metadata.
+            let seq = (file_ref >> 48) as u16;
             if reason & USN_REASON_FILE_DELETE != 0 {
                 ops.push(Op::Delete(record_no));
             } else {
@@ -288,17 +318,39 @@ fn parse_records(buf: &[u8]) -> Vec<Op> {
                 } else {
                     String::new()
                 };
-                ops.push(Op::Upsert(RawRecord {
+                let is_dir = attrs & FILE_ATTRIBUTE_DIRECTORY != 0;
+                let raw = RawRecord {
                     record_no,
                     parent_no: parent_ref & RECORD_MASK,
                     name,
-                    is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    is_dir,
+                    // Journal-only fallbacks; overwritten by `enrich` when the
+                    // MFT record can be read.
                     size: None,
                     modified_ft: timestamp as u64,
-                }));
+                    created_ft: 0,
+                    accessed_ft: 0,
+                    attributes: attrs,
+                };
+                ops.push(Op::Upsert(enrich(raw, seq, reader)));
             }
         }
         p += rec_len;
     }
     ops
+}
+
+/// Replace the journal's partial metadata with the authoritative values from the
+/// live MFT record, keeping the journal's name/parent/is_dir for the changed
+/// link. `seq` guards against the record having been reused since the event. A
+/// failed or rejected read leaves the journal fallbacks in place.
+fn enrich(mut raw: RawRecord, seq: u16, reader: Option<&MftReader>) -> RawRecord {
+    if let Some(meta) = reader.and_then(|r| r.read_meta(raw.record_no, seq)) {
+        raw.size = if raw.is_dir { None } else { meta.size };
+        raw.modified_ft = meta.modified_ft;
+        raw.created_ft = meta.created_ft;
+        raw.accessed_ft = meta.accessed_ft;
+        raw.attributes = meta.attributes;
+    }
+    raw
 }

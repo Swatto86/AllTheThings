@@ -19,7 +19,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | ReFS volumes | ✅ (1.5) | ❌ | NTFS only. |
 | Folder indexing (FAT / network / removable) | ✅ | ❌ | Everything can index non-NTFS folders via a watcher. |
 | Folder-size computation | ✅ | ❌ | |
-| Index dates/attributes selectably | ✅ | ⚠️ | We always store size + modified time. |
+| Index dates/attributes selectably | ✅ | ⚠️ | We always store size, modified, created, accessed + DOS attributes (not selectable). |
 | Include / exclude folders, hidden/system filter | ✅ | ❌ | We index everything. |
 
 ## Search syntax
@@ -35,8 +35,8 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | `path:` (match against full path) | ✅ | ✅ | |
 | `size:` with ranges + units | ✅ | ✅ | e.g. `size:>=1mb size:<16mb`. |
 | OR `\|`, NOT `!`, quotes `" "` | ✅ | ✅ | Grouping `( )` not yet. |
-| Date filters `dm:` `dc:` `da:` | ✅ | ❌ | |
-| Attribute filter `attrib:` | ✅ | ❌ | |
+| Date filters `dm:` `dc:` `da:` | ✅ | ✅ | Keywords (`today`, `thisweek`…), `YYYY[-MM[-DD]]`, ranges `A..B`, `>`/`>=`/`<`/`<=`. |
+| Attribute filter `attrib:` | ✅ | ✅ | e.g. `attrib:h`, `attrib:rhs` — all listed attributes must be set. |
 | Functions: `parent:` `child:` `count:` `dupe:` `len:` … | ✅ | ❌ | |
 | Saved searches / macros | ✅ | ❌ | |
 | Match diacritics | ✅ | ❌ | |
@@ -50,10 +50,10 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Result count + timing | ✅ | ✅ | |
 | Shell file-type icons | ✅ | ✅ | Per extension, cached. |
 | Columns: Name, Path, Size, Date Modified | ✅ | ✅ | |
-| Sort by column (asc/desc) | ✅ | ✅ | Click header. |
+| Sort by column (asc/desc) | ✅ | ✅ | Click header (Name/Path/Size/Modified/Created/Accessed). |
 | Resize columns | ✅ | ✅ | Drag the edge. |
 | Reorder columns | ✅ | ✅ | Drag the header. |
-| Add/remove columns (Created, Accessed, Type, Attributes, Ext, Run count…) | ✅ | ❌ | Fixed 4 columns. |
+| Add/remove columns (Created, Accessed, Type, Attributes, Ext, Run count…) | ✅ | ⚠️ | Header right-click picker: Created / Accessed / Type / Ext / Attributes (no Run count). Layout persisted. |
 | Folders-first sorting | ✅ | ❌ | |
 | Highlight matched text in results | ✅ | ✅ | Name + Path. |
 | Thumbnail / large-icon views | ✅ | ❌ | Details view only. |
@@ -109,17 +109,16 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 
 ## Suggested roadmap (rough priority)
 
-1. **Date filters & more columns** — `dm:`/`dc:`/`da:`, plus Date Created / Type / Attributes / Extension columns (the MFT already has the data).
-2. **Richer context menu** — Delete, Rename, Properties, full shell menu, drag-out.
-3. **Folders-first sorting** and an add/remove-columns picker.
-4. **Bookmarks & saved filters** (search history is done).
-5. **Query grouping** `( )` and exact-phrase refinements.
-6. **Export** (CSV/TXT) and **`.efu` file lists.**
-7. **Global hotkey** + Explorer "search here" integration.
-8. **Light theme** and localization.
-9. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, and an **HTTP/IPC** query interface.
+1. **Richer context menu** — Delete, Rename, Properties, full shell menu, drag-out.
+2. **Folders-first sorting** and sortable Type / Ext / Attributes columns (column picker is done).
+3. **Bookmarks & saved filters** (search history is done).
+4. **Query grouping** `( )` and exact-phrase refinements.
+5. **Export** (CSV/TXT) and **`.efu` file lists.**
+6. **Global hotkey** + Explorer "search here" integration.
+7. **Light theme** and localization.
+8. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, and an **HTTP/IPC** query interface.
 
-_Recently shipped: boolean `\|`/`!`/`"…"`, match highlighting, search history._
+_Recently shipped: date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at
