@@ -108,9 +108,11 @@ impl AppState {
                             );
                         }
                         catalog.write().upsert_volume(volume.index);
-                        watchers
-                            .lock()
-                            .push(UsnWatcher::spawn(drive, catalog.clone(), volume.resume_usn));
+                        watchers.lock().push(UsnWatcher::spawn(
+                            drive,
+                            catalog.clone(),
+                            volume.resume_usn,
+                        ));
                         committed.fetch_add(count, Ordering::Relaxed);
                         indexed.push(IndexedVolume { drive, serial });
                     }
@@ -220,7 +222,13 @@ fn spawn_cache_saver(catalog: Arc<RwLock<Catalog>>, indexed: Vec<IndexedVolume>)
             };
             let entries = catalog.read().volume(vol.drive).map(SearchIndex::export);
             if let Some(entries) = entries {
-                let _ = cache::save(vol.drive, vol.serial, journal.journal_id, journal.next_usn, entries);
+                let _ = cache::save(
+                    vol.drive,
+                    vol.serial,
+                    journal.journal_id,
+                    journal.next_usn,
+                    entries,
+                );
             }
         }
     });

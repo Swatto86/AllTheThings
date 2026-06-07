@@ -37,7 +37,12 @@ fn index_all_volumes_and_search() {
         let started = Instant::now();
         let index = SearchIndex::build_from(&mut reader, &progress).expect("build index");
         total_entries += index.len();
-        println!("  {}: {} entries in {:?}", drive, index.len(), started.elapsed());
+        println!(
+            "  {}: {} entries in {:?}",
+            drive,
+            index.len(),
+            started.elapsed()
+        );
         catalog.upsert_volume(index);
     }
     println!("catalog total: {total_entries} entries");
@@ -49,9 +54,10 @@ fn index_all_volumes_and_search() {
         println!("  {}", h.path);
     }
     assert!(
-        r.hits
-            .iter()
-            .any(|h| h.path.to_lowercase().contains(r"\windows\system32\ntoskrnl.exe")),
+        r.hits.iter().any(|h| h
+            .path
+            .to_lowercase()
+            .contains(r"\windows\system32\ntoskrnl.exe")),
         "expected System32\\ntoskrnl.exe via hardlink expansion"
     );
 
@@ -65,7 +71,9 @@ fn index_all_volumes_and_search() {
     println!("'ext:dll' -> {} total in {} ms", r.total, r.took_ms);
     assert!(r.total > 100, "expected many DLLs");
     assert!(
-        r.hits.iter().all(|h| h.name.to_lowercase().ends_with(".dll")),
+        r.hits
+            .iter()
+            .all(|h| h.name.to_lowercase().ends_with(".dll")),
         "ext:dll returned a non-dll"
     );
 
@@ -78,7 +86,9 @@ fn index_all_volumes_and_search() {
     let r = catalog.search(&opts("size:>100mb"));
     println!("'size:>100mb' -> {} total", r.total);
     assert!(
-        r.hits.iter().all(|h| !h.is_dir && h.size > 100 * 1024 * 1024),
+        r.hits
+            .iter()
+            .all(|h| !h.is_dir && h.size > 100 * 1024 * 1024),
         "size:>100mb returned a folder or small file"
     );
 
@@ -89,7 +99,14 @@ fn index_all_volumes_and_search() {
     let exported = catalog.volume(drive0).expect("volume present").export();
     println!("exported {} entries for {}:", exported.len(), drive0);
 
-    cache::save(drive0, serial, journal.journal_id, journal.next_usn, exported).expect("cache save");
+    cache::save(
+        drive0,
+        serial,
+        journal.journal_id,
+        journal.next_usn,
+        exported,
+    )
+    .expect("cache save");
     let snapshot = cache::load(drive0).expect("cache load");
     assert_eq!(snapshot.journal_id, journal.journal_id);
     assert_eq!(snapshot.volume_serial, serial);
@@ -108,9 +125,10 @@ fn index_all_volumes_and_search() {
     reloaded.upsert_volume(reloaded_index);
     let r = reloaded.search(&opts("ntoskrnl"));
     assert!(
-        r.hits
-            .iter()
-            .any(|h| h.path.to_lowercase().contains(r"\windows\system32\ntoskrnl.exe")),
+        r.hits.iter().any(|h| h
+            .path
+            .to_lowercase()
+            .contains(r"\windows\system32\ntoskrnl.exe")),
         "cache round-trip lost System32\\ntoskrnl.exe"
     );
     println!("cache round-trip OK: 'ntoskrnl' -> {} hits", r.total);

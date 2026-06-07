@@ -119,7 +119,9 @@ impl SearchIndex {
 
         let mut by_name: Vec<u32> = (0..entries.len() as u32).collect();
         by_name.par_sort_unstable_by(|&a, &b| {
-            entries[a as usize].name_lower.cmp(&entries[b as usize].name_lower)
+            entries[a as usize]
+                .name_lower
+                .cmp(&entries[b as usize].name_lower)
         });
 
         Self {
@@ -236,8 +238,10 @@ impl SearchIndex {
         match opts.sort {
             SortKey::Path => {
                 // Path keys must be built for every match to rank correctly.
-                let mut keyed: Vec<(u32, String)> =
-                    matched.par_iter().map(|&i| (i, self.build_path(i as usize))).collect();
+                let mut keyed: Vec<(u32, String)> = matched
+                    .par_iter()
+                    .map(|&i| (i, self.build_path(i as usize)))
+                    .collect();
                 keyed.par_sort_unstable_by(|a, b| a.1.cmp(&b.1));
                 if !opts.ascending {
                     keyed.reverse();
@@ -261,7 +265,9 @@ impl SearchIndex {
                 self.collect_ranked(matched, opts.ascending, opts.limit)
             }
             SortKey::Modified => {
-                matched.par_sort_unstable_by_key(|&i| self.entries[i as usize].modified_ms.unwrap_or(0));
+                matched.par_sort_unstable_by_key(|&i| {
+                    self.entries[i as usize].modified_ms.unwrap_or(0)
+                });
                 self.collect_ranked(matched, opts.ascending, opts.limit)
             }
         }
@@ -269,9 +275,18 @@ impl SearchIndex {
 
     fn collect_ranked(&self, matched: &[u32], ascending: bool, limit: usize) -> Vec<Hit> {
         if ascending {
-            matched.iter().take(limit).map(|&i| self.to_hit(i as usize)).collect()
+            matched
+                .iter()
+                .take(limit)
+                .map(|&i| self.to_hit(i as usize))
+                .collect()
         } else {
-            matched.iter().rev().take(limit).map(|&i| self.to_hit(i as usize)).collect()
+            matched
+                .iter()
+                .rev()
+                .take(limit)
+                .map(|&i| self.to_hit(i as usize))
+                .collect()
         }
     }
 

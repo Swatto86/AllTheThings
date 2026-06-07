@@ -84,7 +84,8 @@ unsafe fn icon_to_png(hicon: *mut c_void) -> Option<Vec<u8>> {
         let (wu, hu) = (w as usize, h as usize);
 
         let mut bmi: BITMAPINFO = zeroed();
-        bmi.bmiHeader.biSize = size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biSize =
+            size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
         bmi.bmiHeader.biWidth = w;
         bmi.bmiHeader.biHeight = -h; // top-down
         bmi.bmiHeader.biPlanes = 1;

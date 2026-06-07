@@ -35,7 +35,11 @@ pub struct StartFlags {
 
 fn settings_path() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(base).join("AllTheThings").join("settings.json"))
+    Some(
+        PathBuf::from(base)
+            .join("AllTheThings")
+            .join("settings.json"),
+    )
 }
 
 pub fn load() -> Settings {

@@ -19,7 +19,10 @@ pub fn ntfs_fixed_drives() -> Vec<char> {
             continue;
         }
         let letter = (b'A' + i as u8) as char;
-        let root: Vec<u16> = format!("{letter}:\\").encode_utf16().chain(once(0)).collect();
+        let root: Vec<u16> = format!("{letter}:\\")
+            .encode_utf16()
+            .chain(once(0))
+            .collect();
 
         if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_FIXED {
             continue;
@@ -53,7 +56,10 @@ pub fn ntfs_fixed_drives() -> Vec<char> {
 /// The volume serial number for `drive`, used to detect a reformatted volume
 /// when validating a cached index. Returns `0` if it cannot be read.
 pub fn volume_serial(drive: char) -> u32 {
-    let root: Vec<u16> = format!("{drive}:\\").encode_utf16().chain(once(0)).collect();
+    let root: Vec<u16> = format!("{drive}:\\")
+        .encode_utf16()
+        .chain(once(0))
+        .collect();
     let mut serial: u32 = 0;
     let ok = unsafe {
         GetVolumeInformationW(
