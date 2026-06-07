@@ -195,6 +195,7 @@ impl SearchIndex {
         if matcher.matches_all()
             && matches!(opts.sort, SortKey::Name)
             && opts.ascending
+            && !opts.folders_first
             && !self.name_order_stale
         {
             let hits = self
@@ -244,54 +245,57 @@ impl SearchIndex {
 
     /// Sort the matched set per `opts` and materialize the top `limit` hits.
     fn rank_and_collect(&self, matched: &mut [u32], opts: &SearchOptions) -> Vec<Hit> {
-        match opts.sort {
-            SortKey::Path => {
-                // Path keys must be built for every match to rank correctly.
-                let mut keyed: Vec<(u32, String)> = matched
-                    .par_iter()
-                    .map(|&i| (i, self.build_path(i as usize)))
-                    .collect();
-                keyed.par_sort_unstable_by(|a, b| a.1.cmp(&b.1));
-                if !opts.ascending {
-                    keyed.reverse();
-                }
-                keyed
-                    .into_iter()
-                    .take(opts.limit)
-                    .map(|(i, path)| self.to_hit_with_path(i as usize, path))
-                    .collect()
-            }
-            SortKey::Name => {
-                matched.par_sort_unstable_by(|&a, &b| {
-                    self.entries[a as usize]
-                        .name_lower
-                        .cmp(&self.entries[b as usize].name_lower)
-                });
-                self.collect_ranked(matched, opts.ascending, opts.limit)
-            }
-            SortKey::Size => {
-                matched.par_sort_unstable_by_key(|&i| size_key(&self.entries[i as usize]));
-                self.collect_ranked(matched, opts.ascending, opts.limit)
-            }
-            SortKey::Modified => {
-                matched.par_sort_unstable_by_key(|&i| {
-                    self.entries[i as usize].modified_ms.unwrap_or(0)
-                });
-                self.collect_ranked(matched, opts.ascending, opts.limit)
-            }
-            SortKey::Created => {
-                matched.par_sort_unstable_by_key(|&i| {
-                    self.entries[i as usize].created_ms.unwrap_or(0)
-                });
-                self.collect_ranked(matched, opts.ascending, opts.limit)
-            }
-            SortKey::Accessed => {
-                matched.par_sort_unstable_by_key(|&i| {
-                    self.entries[i as usize].accessed_ms.unwrap_or(0)
-                });
-                self.collect_ranked(matched, opts.ascending, opts.limit)
+        // Path ranking needs a reconstructed key per entry, so it is separate.
+        if matches!(opts.sort, SortKey::Path) {
+            return self.rank_by_path(matched, opts);
+        }
+
+        let sort = opts.sort;
+        if opts.folders_first {
+            // Group directories first, then order within each group by the column.
+            let asc = opts.ascending;
+            matched.par_sort_unstable_by(|&a, &b| {
+                let (ea, eb) = (&self.entries[a as usize], &self.entries[b as usize]);
+                dir_first(ea, eb).then_with(|| ordered(col_cmp(ea, eb, sort), asc))
+            });
+            matched
+                .iter()
+                .take(opts.limit)
+                .map(|&i| self.to_hit(i as usize))
+                .collect()
+        } else {
+            // Sort ascending once; descending just collects from the other end.
+            matched.par_sort_unstable_by(|&a, &b| {
+                col_cmp(&self.entries[a as usize], &self.entries[b as usize], sort)
+            });
+            self.collect_ranked(matched, opts.ascending, opts.limit)
+        }
+    }
+
+    /// Rank by reconstructed full path (built once per match), honouring the
+    /// folders-first grouping and sort direction.
+    fn rank_by_path(&self, matched: &mut [u32], opts: &SearchOptions) -> Vec<Hit> {
+        let mut keyed: Vec<(u32, String)> = matched
+            .par_iter()
+            .map(|&i| (i, self.build_path(i as usize)))
+            .collect();
+        if opts.folders_first {
+            let asc = opts.ascending;
+            keyed.par_sort_unstable_by(|a, b| {
+                let (ea, eb) = (&self.entries[a.0 as usize], &self.entries[b.0 as usize]);
+                dir_first(ea, eb).then_with(|| ordered(a.1.cmp(&b.1), asc))
+            });
+        } else {
+            keyed.par_sort_unstable_by(|a, b| a.1.cmp(&b.1));
+            if !opts.ascending {
+                keyed.reverse();
             }
         }
+        keyed
+            .into_iter()
+            .take(opts.limit)
+            .map(|(i, path)| self.to_hit_with_path(i as usize, path))
+            .collect()
     }
 
     fn collect_ranked(&self, matched: &[u32], ascending: bool, limit: usize) -> Vec<Hit> {
@@ -394,6 +398,42 @@ fn size_key(e: &FileEntry) -> i64 {
         -1
     } else {
         e.size.map(|s| s as i64).unwrap_or(-1)
+    }
+}
+
+/// Directories before files — the folders-first primary sort key.
+fn dir_first(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
+    b.is_dir.cmp(&a.is_dir)
+}
+
+/// Apply the sort direction to a comparison result.
+fn ordered(ord: std::cmp::Ordering, ascending: bool) -> std::cmp::Ordering {
+    if ascending {
+        ord
+    } else {
+        ord.reverse()
+    }
+}
+
+/// Extension slice of a lowercased name (after the last dot), or `""` if none.
+fn ext_of(name_lower: &str) -> &str {
+    match name_lower.rfind('.') {
+        Some(i) => &name_lower[i + 1..],
+        None => "",
+    }
+}
+
+/// Compare two entries by a sort column, ascending. `Path` is ranked separately.
+fn col_cmp(a: &FileEntry, b: &FileEntry, sort: SortKey) -> std::cmp::Ordering {
+    match sort {
+        SortKey::Name => a.name_lower.cmp(&b.name_lower),
+        SortKey::Size => size_key(a).cmp(&size_key(b)),
+        SortKey::Modified => a.modified_ms.unwrap_or(0).cmp(&b.modified_ms.unwrap_or(0)),
+        SortKey::Created => a.created_ms.unwrap_or(0).cmp(&b.created_ms.unwrap_or(0)),
+        SortKey::Accessed => a.accessed_ms.unwrap_or(0).cmp(&b.accessed_ms.unwrap_or(0)),
+        SortKey::Ext => ext_of(&a.name_lower).cmp(ext_of(&b.name_lower)),
+        SortKey::Attributes => a.attributes.cmp(&b.attributes),
+        SortKey::Path => std::cmp::Ordering::Equal,
     }
 }
 

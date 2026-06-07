@@ -22,7 +22,7 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Toggles** (toolbar): match case, whole word, regular expression, match full path.
 - **Size filter** dropdown: Empty / Tiny / Small / Medium / Large / Huge / Gigantic presets (inserts the matching `size:` range).
 - **Shell file-type icons** — the real Windows icon per extension/folder, fetched on demand and cached.
-- **Sortable, resizable, reorderable columns** — click a header to sort (again to reverse), drag the edge to resize, drag the header to reorder. **Right-click a header** to pick columns: Name, Path, Size, Date modified/created/accessed, Type (registry file-type name), Ext, and Attributes; the layout is remembered.
+- **Sortable, resizable, reorderable columns** — click a header to sort (again to reverse; Name/Path/Size/Date/Ext/Attributes), drag the edge to resize, drag the header to reorder. **Right-click a header** to pick columns: Name, Path, Size, Date modified/created/accessed, Type (registry file-type name), Ext, and Attributes; the layout is remembered. A toolbar **📁 toggle** groups folders first in any sort.
 - **Right-click**: open, open containing folder (Explorer with the item selected), open with, run as administrator, copy full path / name, **rename** (inline, or F2), **delete** to the Recycle Bin (confirmed; or Del), and **Properties**.
 - **Single-instance**: launching again focuses the running window.
 - **System tray**: minimise/close to tray; Show / Settings / Quit menu; left-click to restore.

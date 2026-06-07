@@ -29,7 +29,7 @@ interface IndexStatus {
   message: string;
 }
 
-type SortKey = "name" | "path" | "size" | "modified" | "created" | "accessed";
+type SortKey = "name" | "path" | "size" | "modified" | "created" | "accessed" | "ext" | "attributes";
 interface SearchOptions {
   query: string;
   limit: number;
@@ -39,6 +39,7 @@ interface SearchOptions {
   matchPath: boolean;
   sort: SortKey;
   ascending: boolean;
+  foldersFirst: boolean;
 }
 
 type ColKey =
@@ -74,6 +75,15 @@ const SIZE_PRESETS: [string, string][] = [
   ["Gigantic (> 128 MB)", "size:>128mb"],
 ];
 
+const FOLDERS_FIRST_KEY = "att.foldersFirst";
+function loadFoldersFirst(): boolean {
+  try {
+    return localStorage.getItem(FOLDERS_FIRST_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 const options: SearchOptions = {
   query: "",
   limit: RESULT_LIMIT,
@@ -83,6 +93,7 @@ const options: SearchOptions = {
   matchPath: false,
   sort: "name",
   ascending: true,
+  foldersFirst: loadFoldersFirst(),
 };
 
 // Every column the UI can show. The active set (which, in what order, at what
@@ -95,8 +106,8 @@ const ALL_COLUMNS: readonly Column[] = [
   { key: "created", label: "Date created", sort: "created", width: 160, flex: false },
   { key: "accessed", label: "Date accessed", sort: "accessed", width: 160, flex: false },
   { key: "type", label: "Type", sort: null, width: 150, flex: false },
-  { key: "ext", label: "Ext", sort: null, width: 70, flex: false },
-  { key: "attributes", label: "Attributes", sort: null, width: 96, flex: false },
+  { key: "ext", label: "Ext", sort: "ext", width: 70, flex: false },
+  { key: "attributes", label: "Attributes", sort: "attributes", width: 96, flex: false },
 ];
 const DEFAULT_COLUMNS: ColKey[] = ["name", "path", "size", "date"];
 const COLUMNS_KEY = "att.columns";
@@ -171,6 +182,7 @@ app.innerHTML = /* html */ `
         <button data-opt="regex" title="Use regular expression" class="opt btn btn-xs join-item">.*</button>
         <button data-opt="matchPath" title="Match full path" class="opt btn btn-xs join-item">/</button>
       </div>
+      <button id="folders-first" title="Folders first" class="btn btn-xs">📁</button>
       <button id="gear" title="Settings" class="btn btn-xs">⚙</button>
       <div id="count" class="text-xs opacity-60 whitespace-nowrap min-w-[130px] text-right"></div>
     </div>
@@ -233,6 +245,7 @@ const renameInput = document.querySelector<HTMLInputElement>("#rename-input")!;
 const sizeBtn = document.querySelector<HTMLButtonElement>("#sizebtn")!;
 const sizeMenu = document.querySelector<HTMLDivElement>("#sizemenu")!;
 const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
+const foldersFirstBtn = document.querySelector<HTMLButtonElement>("#folders-first")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overlay")!;
 const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
@@ -884,6 +897,10 @@ function syncControls(): void {
   });
 }
 
+function syncFoldersFirst(): void {
+  foldersFirstBtn.classList.toggle("btn-primary", options.foldersFirst);
+}
+
 // ---- Settings ----
 interface Settings {
   closeToTray: boolean;
@@ -1047,6 +1064,17 @@ rows.addEventListener("contextmenu", (e) => {
   showMenu(e.clientX, e.clientY, hits[selected]);
 });
 
+foldersFirstBtn.addEventListener("click", () => {
+  options.foldersFirst = !options.foldersFirst;
+  try {
+    localStorage.setItem(FOLDERS_FIRST_KEY, options.foldersFirst ? "1" : "0");
+  } catch {
+    /* storage unavailable */
+  }
+  syncFoldersFirst();
+  runSearch();
+  q.focus();
+});
 gear.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
 updateInstall.addEventListener("click", installUpdate);
@@ -1138,6 +1166,7 @@ setCols();
 renderHeader();
 buildSizeMenu();
 syncControls();
+syncFoldersFirst();
 q.focus();
 pollStatus();
 

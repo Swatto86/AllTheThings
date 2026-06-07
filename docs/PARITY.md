@@ -50,11 +50,11 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Result count + timing | ✅ | ✅ | |
 | Shell file-type icons | ✅ | ✅ | Per extension, cached. |
 | Columns: Name, Path, Size, Date Modified | ✅ | ✅ | |
-| Sort by column (asc/desc) | ✅ | ✅ | Click header (Name/Path/Size/Modified/Created/Accessed). |
+| Sort by column (asc/desc) | ✅ | ✅ | Click header — Name/Path/Size/Modified/Created/Accessed/Ext/Attributes (Type not sortable yet). |
 | Resize columns | ✅ | ✅ | Drag the edge. |
 | Reorder columns | ✅ | ✅ | Drag the header. |
 | Add/remove columns (Created, Accessed, Type, Attributes, Ext, Run count…) | ✅ | ⚠️ | Header right-click picker: Created / Accessed / Type / Ext / Attributes (no Run count). Layout persisted. |
-| Folders-first sorting | ✅ | ❌ | |
+| Folders-first sorting | ✅ | ✅ | Toolbar 📁 toggle; folders grouped first in any sort. |
 | Highlight matched text in results | ✅ | ✅ | Name + Path. |
 | Thumbnail / large-icon views | ✅ | ❌ | Details view only. |
 | Preview pane | ✅ | ❌ | |
@@ -110,15 +110,14 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 ## Suggested roadmap (rough priority)
 
 1. **Full shell context menu** (`IContextMenu`) and **drag & drop out** — discrete verbs (Delete, Rename, Properties, Open with, Run as admin) are done.
-2. **Folders-first sorting** and sortable Type / Ext / Attributes columns (column picker is done).
-3. **Bookmarks & saved filters** (search history is done).
-4. **Query grouping** `( )` and exact-phrase refinements.
-5. **Export** (CSV/TXT) and **`.efu` file lists.**
-6. **Global hotkey** + Explorer "search here" integration.
-7. **Light theme** and localization.
-8. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, and an **HTTP/IPC** query interface.
+2. **Bookmarks & saved filters** (search history is done).
+3. **Query grouping** `( )` and exact-phrase refinements.
+4. **Export** (CSV/TXT) and **`.efu` file lists.**
+5. **Global hotkey** + Explorer "search here" integration.
+6. **Light theme** and localization.
+7. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, an **HTTP/IPC** query interface, and a sortable **Type** column.
 
-_Recently shipped: right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
+_Recently shipped: folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at

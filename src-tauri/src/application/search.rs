@@ -24,6 +24,8 @@ pub enum SortKey {
     Modified,
     Created,
     Accessed,
+    Ext,
+    Attributes,
 }
 
 /// The entry fields a [`Matcher`] inspects. `path` / `path_lower` may be empty
@@ -54,6 +56,8 @@ pub struct SearchOptions {
     pub match_path: bool,
     pub sort: SortKey,
     pub ascending: bool,
+    /// Group directories ahead of files, regardless of the sort column/direction.
+    pub folders_first: bool,
 }
 
 impl Default for SearchOptions {
@@ -67,6 +71,7 @@ impl Default for SearchOptions {
             match_path: false,
             sort: SortKey::Name,
             ascending: true,
+            folders_first: false,
         }
     }
 }

@@ -75,6 +75,17 @@ impl Catalog {
 
 /// Re-rank merged hits from multiple volumes by the requested column.
 fn sort_hits(hits: &mut [Hit], opts: &SearchOptions) {
+    if opts.folders_first {
+        let asc = opts.ascending;
+        let sort = opts.sort;
+        // Directories first, then ordered within each group by the column.
+        hits.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| ordered(hit_col_cmp(a, b, sort), asc))
+        });
+        return;
+    }
     match opts.sort {
         SortKey::Name => hits.sort_by_key(|h| h.name.to_lowercase()),
         SortKey::Path => hits.sort_by_key(|h| h.path.to_lowercase()),
@@ -82,8 +93,102 @@ fn sort_hits(hits: &mut [Hit], opts: &SearchOptions) {
         SortKey::Modified => hits.sort_by_key(|h| h.modified),
         SortKey::Created => hits.sort_by_key(|h| h.created),
         SortKey::Accessed => hits.sort_by_key(|h| h.accessed),
+        SortKey::Ext => hits.sort_by_key(hit_ext),
+        SortKey::Attributes => hits.sort_by_key(|h| h.attributes),
     }
     if !opts.ascending {
         hits.reverse();
+    }
+}
+
+fn ordered(ord: std::cmp::Ordering, ascending: bool) -> std::cmp::Ordering {
+    if ascending {
+        ord
+    } else {
+        ord.reverse()
+    }
+}
+
+/// Lowercased extension of a hit's name (after the last dot), or `""`.
+fn hit_ext(h: &Hit) -> String {
+    match h.name.rfind('.') {
+        Some(i) => h.name[i + 1..].to_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// Compare two merged hits by a sort column, ascending.
+fn hit_col_cmp(a: &Hit, b: &Hit, sort: SortKey) -> std::cmp::Ordering {
+    match sort {
+        SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortKey::Path => a.path.to_lowercase().cmp(&b.path.to_lowercase()),
+        SortKey::Size => a.size.cmp(&b.size),
+        SortKey::Modified => a.modified.cmp(&b.modified),
+        SortKey::Created => a.created.cmp(&b.created),
+        SortKey::Accessed => a.accessed.cmp(&b.accessed),
+        SortKey::Ext => hit_ext(a).cmp(&hit_ext(b)),
+        SortKey::Attributes => a.attributes.cmp(&b.attributes),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(name: &str, is_dir: bool) -> Hit {
+        Hit {
+            name: name.into(),
+            path: format!("C:\\{name}"),
+            size: if is_dir { -1 } else { 1 },
+            modified: 0,
+            created: 0,
+            accessed: 0,
+            attributes: 0,
+            is_dir,
+        }
+    }
+
+    fn opts(sort: SortKey, ascending: bool, folders_first: bool) -> SearchOptions {
+        SearchOptions {
+            sort,
+            ascending,
+            folders_first,
+            ..SearchOptions::default()
+        }
+    }
+
+    fn names(hits: &[Hit]) -> Vec<&str> {
+        hits.iter().map(|h| h.name.as_str()).collect()
+    }
+
+    #[test]
+    fn folders_first_groups_dirs_then_sorts_within() {
+        let mut hits = vec![
+            hit("b.txt", false),
+            hit("zdir", true),
+            hit("a.txt", false),
+            hit("adir", true),
+        ];
+        sort_hits(&mut hits, &opts(SortKey::Name, true, true));
+        assert_eq!(names(&hits), ["adir", "zdir", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn folders_first_keeps_dirs_on_top_when_descending() {
+        let mut hits = vec![hit("b.txt", false), hit("adir", true), hit("a.txt", false)];
+        sort_hits(&mut hits, &opts(SortKey::Name, false, true));
+        // Dirs stay grouped on top; files within the group reverse.
+        assert_eq!(names(&hits), ["adir", "b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn ext_sort_orders_by_extension() {
+        let mut hits = vec![
+            hit("a.zip", false),
+            hit("b.doc", false),
+            hit("c.png", false),
+        ];
+        sort_hits(&mut hits, &opts(SortKey::Ext, true, false));
+        assert_eq!(names(&hits), ["b.doc", "c.png", "a.zip"]);
     }
 }
