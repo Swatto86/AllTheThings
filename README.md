@@ -30,6 +30,8 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Settings**: start-with-Windows and close-to-tray toggles, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
 - **Keyboard**: type to filter, ↑/↓ to move, Enter to open.
 
+See [**docs/PARITY.md**](docs/PARITY.md) for a full feature-by-feature comparison with voidtools Everything and the roadmap.
+
 ## Status
 
 Working build with daily-driver parity. Files created after the initial scan show a blank size until the next full index (the USN journal carries no size field).
@@ -43,7 +45,7 @@ Releases are built automatically by the [release workflow](.github/workflows/rel
 ## Requirements
 
 - Windows with at least one **NTFS** volume
-- **Administrator** rights (raw volume access is privileged)
+- **Administrator** rights — reading the raw volume is privileged. The app ships with a `requireAdministrator` manifest, so launching it always prompts for UAC (the logon task elevates silently); there's no way to run it unelevated.
 - Rust (pinned to 1.95.0 via `rust-toolchain.toml`) and Node 20+
 
 ## Verify the engine (no GUI)
