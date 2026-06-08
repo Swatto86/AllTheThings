@@ -207,6 +207,14 @@ app.innerHTML = /* html */ `
     <div class="settings-panel">
       <div class="settings-title">Settings</div>
       <label class="settings-row">
+        <span>Theme<br><span class="hint">Light, dark, or follow Windows</span></span>
+        <select id="set-theme" class="select select-bordered select-sm">
+          <option value="business">Dark</option>
+          <option value="corporate">Light</option>
+          <option value="system">System</option>
+        </select>
+      </label>
+      <label class="settings-row">
         <span>Start with Windows<br><span class="hint">Launches the app into the tray at sign-in so search is ready</span></span>
         <input type="checkbox" id="set-startup" class="toggle toggle-sm toggle-primary" />
       </label>
@@ -280,6 +288,7 @@ const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overla
 const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
 const setExplorer = document.querySelector<HTMLInputElement>("#set-explorer")!;
+const setTheme = document.querySelector<HTMLSelectElement>("#set-theme")!;
 const hotkeyInput = document.querySelector<HTMLInputElement>("#hotkey-input")!;
 const hotkeyClear = document.querySelector<HTMLButtonElement>("#hotkey-clear")!;
 const hotkeyHint = document.querySelector<HTMLSpanElement>("#hotkey-hint")!;
@@ -981,6 +990,28 @@ function syncFoldersFirst(): void {
   foldersFirstBtn.classList.toggle("btn-primary", options.foldersFirst);
 }
 
+// ---- Theme ----
+// "business" = dark (default), "corporate" = light, "system" follows Windows.
+// Stored in localStorage so it applies instantly (the inline script in index.html
+// sets it before first paint to avoid a flash).
+const THEME_KEY = "att.theme";
+function themePref(): string {
+  try {
+    return localStorage.getItem(THEME_KEY) || "business";
+  } catch {
+    return "business";
+  }
+}
+function resolveTheme(pref: string): string {
+  if (pref === "system") {
+    return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "business" : "corporate";
+  }
+  return pref === "corporate" ? "corporate" : "business";
+}
+function applyTheme(): void {
+  document.documentElement.dataset.theme = resolveTheme(themePref());
+}
+
 // ---- Settings ----
 interface Settings {
   closeToTray: boolean;
@@ -1099,6 +1130,7 @@ function searchHere(path: string): void {
 }
 
 function openSettings(): void {
+  setTheme.value = themePref();
   loadSettings();
   fetchServiceState();
   settingsOverlay.classList.remove("hidden");
@@ -1449,6 +1481,17 @@ checkUpdates.addEventListener("click", () => checkForUpdates(true));
 setStartup.addEventListener("change", saveSettings);
 setTray.addEventListener("change", saveSettings);
 setExplorer.addEventListener("change", saveSettings);
+setTheme.addEventListener("change", () => {
+  try {
+    localStorage.setItem(THEME_KEY, setTheme.value);
+  } catch {
+    /* storage unavailable */
+  }
+  applyTheme();
+});
+window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
+  if (themePref() === "system") applyTheme();
+});
 hotkeyInput.addEventListener("focus", () => {
   hotkeyInput.value = "";
   hotkeyInput.placeholder = "Press a key combo…";
@@ -1582,6 +1625,7 @@ q.addEventListener("keydown", (e) => {
 });
 
 // ---- Init ----
+applyTheme();
 setCols();
 renderHeader();
 buildSizeMenu();
