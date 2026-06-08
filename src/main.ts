@@ -202,9 +202,17 @@ app.innerHTML = /* html */ `
     <div class="settings-panel">
       <div class="settings-title">Settings</div>
       <label class="settings-row">
-        <span>Start with Windows<br><span class="hint">Runs elevated at sign-in, indexes in the background, lives in the tray</span></span>
+        <span>Start with Windows<br><span class="hint">Launches the app at sign-in (elevated, minimized to the tray) so search is ready</span></span>
         <input type="checkbox" id="set-startup" class="toggle toggle-sm toggle-primary" />
       </label>
+      <div class="settings-row">
+        <span>Background index service<br><span class="hint" id="svc-hint">A Windows service that indexes for the app, so it can run without elevation later</span></span>
+        <div class="svc-controls">
+          <span id="svc-state" class="svc-state">…</span>
+          <button id="svc-power" class="btn btn-xs hidden"></button>
+          <button id="svc-install" class="btn btn-xs hidden"></button>
+        </div>
+      </div>
       <label class="settings-row">
         <span>Close button minimizes to tray<br><span class="hint">Otherwise the window closing quits the app</span></span>
         <input type="checkbox" id="set-tray" class="toggle toggle-sm toggle-primary" />
@@ -255,6 +263,14 @@ const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
 const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
 const settingsClose = document.querySelector<HTMLButtonElement>("#settings-close")!;
+const svcState = document.querySelector<HTMLSpanElement>("#svc-state")!;
+const svcPower = document.querySelector<HTMLButtonElement>("#svc-power")!;
+const svcInstall = document.querySelector<HTMLButtonElement>("#svc-install")!;
+const svcHint = document.querySelector<HTMLSpanElement>("#svc-hint")!;
+
+/// Whether this session's searches are served by the background service (chosen
+/// once at launch). Drives the status-bar source indicator and the Settings note.
+let backendUsesService = false;
 const updateBanner = document.querySelector<HTMLDivElement>("#update-banner")!;
 const updateText = document.querySelector<HTMLSpanElement>("#update-text")!;
 const updateInstall = document.querySelector<HTMLButtonElement>("#update-install")!;
@@ -649,12 +665,17 @@ function scheduleSearch(): void {
 async function pollStatus(): Promise<void> {
   try {
     const s = await invoke<IndexStatus>("index_status");
-    statusEl.textContent =
-      s.state === "indexing"
-        ? `Indexing ${s.volume}… ${s.count.toLocaleString()} items`
-        : s.state === "error"
-          ? `Index error: ${s.message}`
-          : `Ready · ${s.count.toLocaleString()} items on ${s.volume}`;
+    if (s.state === "error") {
+      // An error already names the source (e.g. "background service unavailable"),
+      // so don't append the "· via service" suffix and contradict it.
+      statusEl.textContent = `Index error: ${s.message}`;
+    } else {
+      const src = backendUsesService ? " · via service" : "";
+      statusEl.textContent =
+        (s.state === "indexing"
+          ? `Indexing ${s.volume}… ${s.count.toLocaleString()} items`
+          : `Ready · ${s.count.toLocaleString()} items on ${s.volume}`) + src;
+    }
     if (s.state === "indexing") {
       window.setTimeout(pollStatus, 350);
     } else {
@@ -935,11 +956,133 @@ async function saveSettings(): Promise<void> {
 
 function openSettings(): void {
   loadSettings();
+  fetchServiceState();
   settingsOverlay.classList.remove("hidden");
 }
 
 function closeSettings(): void {
   settingsOverlay.classList.add("hidden");
+}
+
+// ---- Background service ----
+type SvcState =
+  | "not_installed"
+  | "stopped"
+  | "running"
+  | "start_pending"
+  | "stop_pending"
+  | "other";
+
+// Guards against overlapping install/start/stop actions.
+let svcBusy = false;
+
+/// Read live SCM state + which backend this session uses, and render the row.
+async function fetchServiceState(): Promise<SvcState | "error"> {
+  try {
+    const [state, usesService] = await Promise.all([
+      invoke<SvcState>("service_status"),
+      invoke<boolean>("uses_service"),
+    ]);
+    backendUsesService = usesService;
+    renderServiceState(state, usesService);
+    return state;
+  } catch (e) {
+    svcState.textContent = "unavailable";
+    svcPower.classList.add("hidden");
+    svcInstall.classList.add("hidden");
+    settingsMsg.textContent = `Service status unavailable: ${e}`;
+    return "error";
+  }
+}
+
+function renderServiceState(state: SvcState, usesService: boolean): void {
+  const pending = state === "start_pending" || state === "stop_pending";
+  svcInstall.classList.remove("hidden");
+  svcInstall.disabled = svcBusy || pending;
+  svcPower.disabled = svcBusy || pending;
+
+  // The install button toggles install/uninstall; the power button start/stop.
+  const setInstall = (label: string, action: string) => {
+    svcInstall.textContent = label;
+    svcInstall.dataset.action = action;
+  };
+  const setPower = (label: string | null, action?: string) => {
+    if (label === null) {
+      svcPower.classList.add("hidden");
+      return;
+    }
+    svcPower.classList.remove("hidden");
+    svcPower.textContent = label;
+    svcPower.dataset.action = action!;
+  };
+
+  switch (state) {
+    case "not_installed":
+      svcState.textContent = "Not installed";
+      setInstall("Install", "install");
+      setPower(null);
+      break;
+    case "running":
+      svcState.textContent = usesService ? "Running · in use" : "Running";
+      setInstall("Uninstall", "uninstall");
+      setPower("Stop", "stop");
+      break;
+    case "stopped":
+      svcState.textContent = "Installed · stopped";
+      setInstall("Uninstall", "uninstall");
+      setPower("Start", "start");
+      break;
+    case "start_pending":
+      svcState.textContent = "Starting…";
+      setInstall("Uninstall", "uninstall");
+      setPower(null);
+      break;
+    case "stop_pending":
+      svcState.textContent = "Stopping…";
+      setInstall("Uninstall", "uninstall");
+      setPower(null);
+      break;
+    default:
+      svcState.textContent = "Installed";
+      setInstall("Uninstall", "uninstall");
+      setPower(null);
+  }
+
+  // The backend is fixed at launch and never silently re-indexes locally, so the
+  // hint must track BOTH the session binding (usesService) and the live state —
+  // otherwise stopping/uninstalling the in-use service shows "served by the
+  // service" next to a "stopped" label.
+  if (usesService && state === "running") {
+    svcHint.textContent = "Search is served by the background service.";
+  } else if (usesService) {
+    svcHint.textContent = "The service this session was using is no longer running — restart AllTheThings.";
+  } else if (state !== "not_installed") {
+    svcHint.textContent = "Installed — restart AllTheThings to search via the service.";
+  } else {
+    svcHint.textContent = "A Windows service that indexes for the app, so it can run without elevation later.";
+  }
+}
+
+/// Invoke a service command, then settle the UI on the resulting SCM state
+/// (start/stop briefly report a *_pending state).
+async function serviceAction(command: string): Promise<void> {
+  if (svcBusy) return;
+  svcBusy = true;
+  settingsMsg.textContent = "";
+  svcInstall.disabled = true;
+  svcPower.disabled = true;
+  try {
+    await invoke(command);
+  } catch (e) {
+    settingsMsg.textContent = `${e}`;
+  }
+  svcBusy = false;
+  for (let i = 0; i < 12; i++) {
+    if (settingsOverlay.classList.contains("hidden")) break;
+    const state = await fetchServiceState();
+    if (state !== "start_pending" && state !== "stop_pending") break;
+    await new Promise((r) => setTimeout(r, 400));
+  }
 }
 
 // ---- Auto-update ----
@@ -1019,7 +1162,9 @@ async function exportResults(): Promise<void> {
   try {
     const r = await invoke<{ written: number; total: number }>("export_results", { options, format, path });
     let msg = `Exported ${r.written.toLocaleString()} items`;
-    if (r.written < r.total) msg += ` (of ${r.total.toLocaleString()}; capped at 1,000,000)`;
+    // The effective cap depends on the backend (the in-process index allows more
+    // rows than the service), so report the real numbers rather than a fixed cap.
+    if (r.written < r.total) msg += ` (of ${r.total.toLocaleString()}; limited to ${r.written.toLocaleString()})`;
     if (unknownExt) msg += " as CSV";
     statusEl.textContent = `${msg} to ${path}`;
   } catch (e) {
@@ -1125,6 +1270,16 @@ updateLater.addEventListener("click", () => updateBanner.classList.add("hidden")
 checkUpdates.addEventListener("click", () => checkForUpdates(true));
 setStartup.addEventListener("change", saveSettings);
 setTray.addEventListener("change", saveSettings);
+svcInstall.addEventListener("click", () => {
+  const action = svcInstall.dataset.action;
+  if (action === "install") serviceAction("install_service");
+  else if (action === "uninstall") serviceAction("uninstall_service");
+});
+svcPower.addEventListener("click", () => {
+  const action = svcPower.dataset.action;
+  if (action === "start") serviceAction("start_service");
+  else if (action === "stop") serviceAction("stop_service");
+});
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
@@ -1211,6 +1366,12 @@ buildSizeMenu();
 syncControls();
 syncFoldersFirst();
 q.focus();
+// Learn the active backend once so the status bar can show its source.
+invoke<boolean>("uses_service")
+  .then((v) => {
+    backendUsesService = v;
+  })
+  .catch(() => {});
 pollStatus();
 
 // Reveal the window after paint — unless launched into the tray (--minimized).

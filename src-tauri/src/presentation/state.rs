@@ -1,18 +1,13 @@
-//! Tauri-managed application state: a thin wrapper over the platform-level
-//! [`Indexer`], exposing the shared catalog and a status snapshot to commands.
+//! Tauri-managed application state: the session's [`SearchBackend`] (the
+//! background service if one is running, else in-process indexing), with search
+//! and status routed through it.
 
-use std::sync::Arc;
-
-use parking_lot::RwLock;
-
-use crate::application::{Catalog, IndexStatus};
-use crate::infrastructure::indexing::Indexer;
+use crate::application::{IndexStatus, SearchOptions, SearchResult};
+use crate::presentation::backend::SearchBackend;
 
 /// Shared state managed by Tauri and read by command handlers.
 pub struct AppState {
-    /// Shared catalog handle (searched by the `search`/`export_results` commands).
-    pub catalog: Arc<RwLock<Catalog>>,
-    indexer: Indexer,
+    backend: SearchBackend,
 }
 
 impl Default for AppState {
@@ -22,19 +17,25 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Detect the backend (probe for a service, else start in-process indexing).
     pub fn new() -> Self {
-        let indexer = Indexer::new();
-        let catalog = indexer.catalog();
-        Self { catalog, indexer }
+        Self {
+            backend: SearchBackend::detect(),
+        }
     }
 
-    /// Start indexing every fixed NTFS volume in the background.
-    pub fn start_indexing(&self) {
-        self.indexer.start();
+    /// Run a search against the active backend.
+    pub fn search(&self, options: &SearchOptions) -> SearchResult {
+        self.backend.search(options)
     }
 
-    /// Current status for the UI.
+    /// Current index status for the UI.
     pub fn status(&self) -> IndexStatus {
-        self.indexer.status()
+        self.backend.status()
+    }
+
+    /// Whether searches are served by the background service (vs. in-process).
+    pub fn uses_service(&self) -> bool {
+        self.backend.uses_service()
     }
 }

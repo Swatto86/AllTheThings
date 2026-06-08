@@ -18,18 +18,27 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use presentation::commands::{
-    delete_path, export_results, file_icon, file_type, get_settings, index_status, open_path,
-    rename_path, reveal_path, search, set_settings, shell_action, start_hidden,
+    delete_path, export_results, file_icon, file_type, get_settings, index_status, install_service,
+    open_path, rename_path, reveal_path, search, service_status, set_settings, shell_action,
+    start_hidden, start_service, stop_service, uninstall_service, uses_service,
 };
 use presentation::settings::{self, SettingsState, StartFlags};
 use presentation::state::AppState;
+
+/// Entry point when the SCM launches this exe with `--service`: run the headless
+/// index service. Blocks until the service stops; never builds a window. A
+/// failure (e.g. launched outside the SCM) just returns and the process exits.
+pub fn run_service() {
+    let _ = infrastructure::service::host::run();
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let start_hidden_flag = std::env::args().any(|arg| arg == "--minimized");
 
+    // Detects the backend: queries the service if one is running, else starts
+    // in-process indexing.
     let state = AppState::new();
-    state.start_indexing();
     let settings = settings::load();
 
     tauri::Builder::default()
@@ -78,6 +87,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search,
             index_status,
+            uses_service,
             open_path,
             reveal_path,
             rename_path,
@@ -88,7 +98,12 @@ pub fn run() {
             file_type,
             get_settings,
             set_settings,
-            start_hidden
+            start_hidden,
+            service_status,
+            install_service,
+            uninstall_service,
+            start_service,
+            stop_service
         ])
         .run(tauri::generate_context!())
         .expect("error while running AllTheThings");

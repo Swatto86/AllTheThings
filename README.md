@@ -29,7 +29,8 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **System tray**: minimise/close to tray; Show / Settings / Quit menu; left-click to restore.
 - **Auto-updates**: on launch it checks GitHub Releases for a newer **signed** build; an in-app banner offers one-click *Install & restart*. Also available from Settings → *Check now*.
 - **Run at startup** (Settings): registers an elevated logon scheduled task so it auto-starts with admin rights into the tray and indexes in the background — no UAC prompt. The installer sets this up too.
-- **Settings**: start-with-Windows and close-to-tray toggles, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
+- **Optional background service** (Settings): install a LocalSystem Windows service (`AllTheThingsSvc`) that indexes in the background; while it's running the app queries it over a local named pipe instead of indexing in-process (the status bar shows *· via service*). The pipe is **query-only** and same-machine — all file actions (open/rename/delete/…) still run in your own user context, never the service's. Install / start / stop / uninstall straight from Settings (requires elevation). The GUI still requires Administrator for now; running it fully unelevated lands in a later release.
+- **Settings**: start-with-Windows, optional background-service management, and close-to-tray, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
 - **Keyboard**: type to filter, ↑/↓ to move, Enter to open.
 
 See [**docs/PARITY.md**](docs/PARITY.md) for a full feature-by-feature comparison with voidtools Everything and the roadmap.

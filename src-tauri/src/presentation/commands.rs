@@ -11,21 +11,29 @@ use tauri_plugin_opener::OpenerExt;
 use crate::application::export::{self, ExportFormat};
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::fileops::{self, ShellVerb};
+use crate::infrastructure::service::scm::{self, SvcState};
 use crate::infrastructure::{icons, startup};
 
 use super::settings::{self, Settings, SettingsState, StartFlags};
 use super::state::AppState;
 
-/// Search the catalog with the given options, returning ranked hits.
+/// Search via the active backend (the service, or the in-process index).
 #[tauri::command]
 pub fn search(state: State<'_, AppState>, options: SearchOptions) -> SearchResult {
-    state.catalog.read().search(&options)
+    state.search(&options)
 }
 
 /// Report indexing progress / readiness for the status bar.
 #[tauri::command]
 pub fn index_status(state: State<'_, AppState>) -> IndexStatus {
     state.status()
+}
+
+/// Whether searches are served by the background service (vs. in-process), for
+/// the status indicator.
+#[tauri::command]
+pub fn uses_service(state: State<'_, AppState>) -> bool {
+    state.uses_service()
 }
 
 /// Upper bound on rows written by a single export — a guardrail, not a normal limit.
@@ -53,7 +61,7 @@ pub fn export_results(
     let mut opts = options;
     opts.limit = EXPORT_CAP;
 
-    let result = state.catalog.read().search(&opts);
+    let result = state.search(&opts);
     if let Some(e) = result.error {
         return Err(e);
     }
@@ -157,4 +165,42 @@ pub fn reveal_path(path: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+// ---- Background service management ----
+//
+// Read live from the SCM, never cached, so the Settings UI reconciles to reality
+// (the way `get_settings` reconciles `run_at_startup` from the real logon task).
+// Install/start/stop/uninstall require elevation; the GUI is still elevated in
+// this phase, so these call straight through — surfacing an access-denied as a
+// clear message if it ever runs unelevated.
+
+/// The service's current SCM state, for the Settings status row.
+#[tauri::command]
+pub fn service_status() -> Result<SvcState, String> {
+    scm::status()
+}
+
+/// Register the service (LocalSystem, auto-start, this exe + `--service`).
+#[tauri::command]
+pub fn install_service() -> Result<(), String> {
+    scm::install()
+}
+
+/// Stop (if running) and remove the service registration.
+#[tauri::command]
+pub fn uninstall_service() -> Result<(), String> {
+    scm::uninstall()
+}
+
+/// Start the installed service.
+#[tauri::command]
+pub fn start_service() -> Result<(), String> {
+    scm::start()
+}
+
+/// Stop the running service.
+#[tauri::command]
+pub fn stop_service() -> Result<(), String> {
+    scm::stop()
 }

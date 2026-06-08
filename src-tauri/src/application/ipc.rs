@@ -6,11 +6,6 @@
 //! The protocol is deliberately **query-only** — no request can make the
 //! (elevated) service open, write, rename, delete, or execute anything. All such
 //! actions stay in the GUI, running in the user's own context.
-//!
-//! Staged foundation: the protocol types are used by tests now and wired into
-//! the service host + GUI client in the next phase, so the `dead_code` allow is
-//! removed then. (See the approved background-service plan.)
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

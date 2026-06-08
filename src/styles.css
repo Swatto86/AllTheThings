@@ -216,6 +216,17 @@ mark.hl {
   font-size: 11px;
   opacity: 0.6;
 }
+.svc-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.svc-state {
+  font-size: 12px;
+  opacity: 0.7;
+  white-space: nowrap;
+}
 .settings-msg {
   min-height: 18px;
   font-size: 12px;

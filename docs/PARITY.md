@@ -77,7 +77,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | System tray (minimize/close to tray) | ✅ | ✅ | |
 | Run on startup | ✅ | ✅ | Elevated logon scheduled task. |
 | Single instance | ✅ | ✅ | |
-| Runs elevated for raw volume access | via service | ⚠️ | Everything's optional **service** lets the GUI run *without* admin; we require admin per launch (UAC), with the logon task providing silent elevation. |
+| Runs elevated for raw volume access | via service | ⚠️ | An optional LocalSystem **service** (`AllTheThingsSvc`) now indexes in the background and the GUI queries it over a local query-only pipe; the GUI itself still requires admin per launch (UAC + logon task) until the manifest is dropped to `asInvoker` in the de-elevation step. |
 | Explorer "Search Everything here" context menu | ✅ | ❌ | |
 | Global hotkey to show | ✅ | ❌ | |
 
@@ -103,7 +103,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Command-line interface (`es.exe`) | ✅ | ❌ | |
 | HTTP server (web UI) | ✅ | ❌ | |
 | ETP/FTP server + client (remote search) | ✅ | ❌ | |
-| IPC / SDK (other apps query the index) | ✅ | ❌ | |
+| IPC / SDK (other apps query the index) | ✅ | ⚠️ | Internal query-only named pipe (`\\.\pipe\AllTheThings`) backs the optional service; no public/documented SDK yet. |
 
 ---
 
@@ -115,9 +115,10 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 4. **Open `.efu` file lists** as a search source (writing them is done).
 5. **Global hotkey** + Explorer "search here" integration.
 6. **Light theme** and localization.
-7. **Bigger lifts:** a real background **service** (so the GUI needn't be elevated), **folder/ReFS indexing**, a **CLI**, an **HTTP/IPC** query interface, and a sortable **Type** column.
+7. **Finish de-elevation:** the optional background **service** now ships and the GUI queries it; the remaining step is dropping the `requireAdministrator` manifest to `asInvoker` so the GUI runs without admin, with the installer registering the service.
+8. **Bigger lifts:** **folder/ReFS indexing**, a **CLI**, an **HTTP** query interface, and a public IPC/SDK.
 
-_Recently shipped: export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
+_Recently shipped: an optional LocalSystem background **service** with dual-mode GUI fallback (query-only named-pipe IPC, install/start/stop from Settings), export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at

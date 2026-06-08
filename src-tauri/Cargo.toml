@@ -37,6 +37,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
