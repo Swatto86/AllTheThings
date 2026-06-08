@@ -12,7 +12,7 @@ use crate::application::export::{self, ExportFormat};
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::fileops::{self, ShellVerb};
 use crate::infrastructure::service::scm::{self, SvcState};
-use crate::infrastructure::{icons, startup};
+use crate::infrastructure::{elevation, icons, startup};
 
 use super::settings::{self, Settings, SettingsState, StartFlags};
 use super::state::AppState;
@@ -107,16 +107,35 @@ pub fn get_settings(state: State<'_, SettingsState>) -> Settings {
 /// Persist settings and apply side effects (register/unregister the logon task).
 #[tauri::command]
 pub fn set_settings(state: State<'_, SettingsState>, settings: Settings) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let exe = exe.to_string_lossy().into_owned();
-    if settings.run_at_startup {
-        startup::register(&exe)?;
-    } else {
-        startup::unregister().ok();
+    // The logon task uses `/rl highest`, which needs admin to create or delete.
+    // Only touch it when the toggle actually changed (reconciled from the real
+    // task), and relaunch elevated when the GUI isn't — mirroring the service
+    // commands — so an unelevated GUI can still manage it.
+    if settings.run_at_startup != startup::task_exists() {
+        if elevation::is_elevated() {
+            apply_startup_task(settings.run_at_startup)?;
+        } else {
+            let arg = if settings.run_at_startup {
+                "--task-install"
+            } else {
+                "--task-uninstall"
+            };
+            elevation::run_elevated(arg)?;
+        }
     }
     *state.0.write() = settings.clone();
     settings::save(&settings).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Register or unregister the elevated logon task directly (caller is elevated).
+fn apply_startup_task(enable: bool) -> Result<(), String> {
+    if enable {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        startup::register(&exe.to_string_lossy())
+    } else {
+        startup::unregister()
+    }
 }
 
 /// Whether the app was launched with `--minimized` (so the UI stays hidden).
@@ -169,11 +188,12 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 
 // ---- Background service management ----
 //
-// Read live from the SCM, never cached, so the Settings UI reconciles to reality
-// (the way `get_settings` reconciles `run_at_startup` from the real logon task).
-// Install/start/stop/uninstall require elevation; the GUI is still elevated in
-// this phase, so these call straight through — surfacing an access-denied as a
-// clear message if it ever runs unelevated.
+// Status is read live from the SCM (never cached), so the Settings UI reconciles
+// to reality — the way `get_settings` reconciles `run_at_startup` from the real
+// logon task. Status needs only CONNECT + QUERY_STATUS, which an unelevated GUI
+// has; install/start/stop/uninstall need admin, so they run directly when the
+// GUI is already elevated (e.g. launched from the logon task) and otherwise
+// relaunch this exe elevated (a UAC prompt) to do the work.
 
 /// The service's current SCM state, for the Settings status row.
 #[tauri::command]
@@ -184,23 +204,61 @@ pub fn service_status() -> Result<SvcState, String> {
 /// Register the service (LocalSystem, auto-start, this exe + `--service`).
 #[tauri::command]
 pub fn install_service() -> Result<(), String> {
-    scm::install()
+    manage_service("--svc-install", scm::install)
 }
 
 /// Stop (if running) and remove the service registration.
 #[tauri::command]
 pub fn uninstall_service() -> Result<(), String> {
-    scm::uninstall()
+    manage_service("--svc-uninstall", scm::uninstall)
 }
 
 /// Start the installed service.
 #[tauri::command]
 pub fn start_service() -> Result<(), String> {
-    scm::start()
+    manage_service("--svc-start", scm::start)
 }
 
 /// Stop the running service.
 #[tauri::command]
 pub fn stop_service() -> Result<(), String> {
-    scm::stop()
+    manage_service("--svc-stop", scm::stop)
+}
+
+/// Install **and** start the service in one elevated step (one UAC prompt),
+/// used by the migration banner so adopting the service isn't two prompts.
+#[tauri::command]
+pub fn setup_service() -> Result<(), String> {
+    manage_service("--svc-setup", setup_service_direct)
+}
+
+fn setup_service_direct() -> Result<(), String> {
+    scm::install()?;
+    scm::start()
+}
+
+/// Record that the one-time service-migration prompt has been shown. The
+/// frontend calls this when it actually renders the banner, so a lost or
+/// too-early event never permanently suppresses the nudge.
+#[tauri::command]
+pub fn mark_service_prompt_seen() {
+    settings::mark_service_prompt_seen();
+}
+
+/// Whether the GUI is currently elevated — lets the frontend tailor its wording
+/// (service actions prompt for admin only when it isn't).
+#[tauri::command]
+pub fn is_elevated() -> bool {
+    elevation::is_elevated()
+}
+
+/// Run a service-management action directly if already elevated, otherwise
+/// relaunch this exe elevated (UAC) to run the matching one-shot `--svc-*`
+/// command. `direct` and `elevated_arg` must be two routes to the same action.
+fn manage_service(elevated_arg: &str, direct: fn() -> Result<(), String>) -> Result<(), String> {
+    if elevation::is_elevated() {
+        direct()
+    } else {
+        elevation::run_elevated(elevated_arg)
+    }
 }

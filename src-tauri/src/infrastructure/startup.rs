@@ -1,5 +1,10 @@
-//! Manage the elevated logon scheduled task that auto-starts AllTheThings.
-//! Uses `schtasks.exe`; `/rl highest` requires the caller to be elevated.
+//! Manage the logon scheduled task that auto-launches AllTheThings into the tray
+//! at sign-in. Uses `schtasks.exe`. Since the GUI now runs unelevated and the
+//! background service does the indexing, the task launches the GUI **without**
+//! elevation (no `/rl highest`) — so the auto-started instance shares the same
+//! integrity level as a manual launch (keeping single-instance focus working)
+//! and never silently re-elevates. Creating/removing a task under the root
+//! folder still needs admin, so callers relaunch elevated when they aren't.
 
 use std::os::windows::process::CommandExt;
 use std::process::Command;
@@ -17,12 +22,12 @@ pub fn task_exists() -> bool {
         .unwrap_or(false)
 }
 
-/// Register (or replace) the task to launch `exe --minimized` at logon, elevated.
+/// Register (or replace) the task to launch `exe --minimized` (unelevated) at logon.
 pub fn register(exe: &str) -> Result<(), String> {
     let run = format!("\"{exe}\" --minimized");
     let status = Command::new("schtasks")
         .args([
-            "/create", "/tn", TASK_NAME, "/tr", &run, "/sc", "onlogon", "/rl", "highest", "/f",
+            "/create", "/tn", TASK_NAME, "/tr", &run, "/sc", "onlogon", "/f",
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .status()

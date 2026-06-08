@@ -14,12 +14,16 @@
     </dependentAssembly>
   </dependency>
 
-  <!-- Reading the raw NTFS volume requires elevation, so always request it:
-       a normal launch triggers UAC instead of silently failing to index. -->
+  <!-- Run unelevated by default. Indexing is done by the LocalSystem background
+       service, which the GUI queries over a local pipe — no admin needed for the
+       GUI. Service management (install/start/stop) needs admin and relaunches
+       elevated on demand (UAC); with no service present, the GUI guides the user
+       to install it or relaunch elevated to index in-process. The logon task
+       auto-launches the GUI unelevated (no fallback elevation). -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

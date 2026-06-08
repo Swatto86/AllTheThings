@@ -170,6 +170,13 @@ app.innerHTML = /* html */ `
         <button id="update-later" class="btn btn-xs btn-ghost">Later</button>
       </div>
     </div>
+    <div id="service-banner" class="update-banner hidden">
+      <span id="service-banner-text">AllTheThings can now index in the background without admin. Install the service?</span>
+      <div class="flex gap-2 ml-auto">
+        <button id="service-banner-install" class="btn btn-xs btn-primary">Install service</button>
+        <button id="service-banner-later" class="btn btn-xs btn-ghost">Not now</button>
+      </div>
+    </div>
     <div class="flex items-center gap-2 p-2 border-b border-base-300">
       <input id="q" type="text" placeholder="Search all the things…" autocomplete="off" spellcheck="false"
         class="input input-bordered input-sm flex-1 font-mono" />
@@ -275,6 +282,10 @@ const updateBanner = document.querySelector<HTMLDivElement>("#update-banner")!;
 const updateText = document.querySelector<HTMLSpanElement>("#update-text")!;
 const updateInstall = document.querySelector<HTMLButtonElement>("#update-install")!;
 const updateLater = document.querySelector<HTMLButtonElement>("#update-later")!;
+const serviceBanner = document.querySelector<HTMLDivElement>("#service-banner")!;
+const serviceBannerText = document.querySelector<HTMLSpanElement>("#service-banner-text")!;
+const serviceBannerInstall = document.querySelector<HTMLButtonElement>("#service-banner-install")!;
+const serviceBannerLater = document.querySelector<HTMLButtonElement>("#service-banner-later")!;
 const checkUpdates = document.querySelector<HTMLButtonElement>("#check-updates")!;
 const updateStatus = document.querySelector<HTMLSpanElement>("#update-status")!;
 
@@ -979,12 +990,13 @@ let svcBusy = false;
 /// Read live SCM state + which backend this session uses, and render the row.
 async function fetchServiceState(): Promise<SvcState | "error"> {
   try {
-    const [state, usesService] = await Promise.all([
+    const [state, usesService, elevated] = await Promise.all([
       invoke<SvcState>("service_status"),
       invoke<boolean>("uses_service"),
+      invoke<boolean>("is_elevated"),
     ]);
     backendUsesService = usesService;
-    renderServiceState(state, usesService);
+    renderServiceState(state, usesService, elevated);
     return state;
   } catch (e) {
     svcState.textContent = "unavailable";
@@ -995,7 +1007,7 @@ async function fetchServiceState(): Promise<SvcState | "error"> {
   }
 }
 
-function renderServiceState(state: SvcState, usesService: boolean): void {
+function renderServiceState(state: SvcState, usesService: boolean, elevated: boolean): void {
   const pending = state === "start_pending" || state === "stop_pending";
   svcInstall.classList.remove("hidden");
   svcInstall.disabled = svcBusy || pending;
@@ -1059,7 +1071,11 @@ function renderServiceState(state: SvcState, usesService: boolean): void {
   } else if (state !== "not_installed") {
     svcHint.textContent = "Installed — restart AllTheThings to search via the service.";
   } else {
-    svcHint.textContent = "A Windows service that indexes for the app, so it can run without elevation later.";
+    svcHint.textContent = "A Windows service that indexes for the app, so it can run without admin.";
+  }
+  // When the GUI is unelevated, managing the service triggers a UAC prompt.
+  if (!elevated) {
+    svcHint.textContent += " Managing it prompts for admin.";
   }
 }
 
@@ -1082,6 +1098,27 @@ async function serviceAction(command: string): Promise<void> {
     const state = await fetchServiceState();
     if (state !== "start_pending" && state !== "stop_pending") break;
     await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+// ---- Service migration banner ----
+// Shown once, driven by the backend's "suggest-service" event, for auto-updated
+// installs still relying on the elevated logon task: offer to adopt the service
+// so the app can run unelevated. (Fresh installs get the service from the
+// installer, so they never see this.)
+async function installServiceFromBanner(): Promise<void> {
+  serviceBannerInstall.disabled = true;
+  serviceBannerLater.disabled = true;
+  serviceBannerText.textContent = "Installing the background service…";
+  try {
+    // One elevated step (install + start) → a single UAC prompt.
+    await invoke("setup_service");
+    serviceBanner.classList.add("hidden");
+    statusEl.textContent = "Background service installed — restart AllTheThings to search via it.";
+  } catch (e) {
+    serviceBannerText.textContent = `Could not install the service: ${e}`;
+    serviceBannerInstall.disabled = false;
+    serviceBannerLater.disabled = false;
   }
 }
 
@@ -1267,6 +1304,8 @@ gear.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
 updateInstall.addEventListener("click", installUpdate);
 updateLater.addEventListener("click", () => updateBanner.classList.add("hidden"));
+serviceBannerInstall.addEventListener("click", installServiceFromBanner);
+serviceBannerLater.addEventListener("click", () => serviceBanner.classList.add("hidden"));
 checkUpdates.addEventListener("click", () => checkForUpdates(true));
 setStartup.addEventListener("change", saveSettings);
 setTray.addEventListener("change", saveSettings);
@@ -1285,6 +1324,11 @@ settingsOverlay.addEventListener("click", (e) => {
 });
 listen("open-settings", openSettings);
 listen<string>("shell-error", (e) => reportErr(e.payload));
+listen("suggest-service", () => {
+  serviceBanner.classList.remove("hidden");
+  // Mark seen on actual delivery, so a lost/early event re-offers next launch.
+  invoke("mark_service_prompt_seen").catch(() => {});
+});
 
 // Confirm dialog
 confirmOk.addEventListener("click", () => resolveConfirm(true));

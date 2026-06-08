@@ -1,80 +1,90 @@
-# Manual test — background service (Phases 2–4)
+# Manual test — background service & de-elevation (Phases 2–5)
 
-The dev/CI shell is **non-elevated**, so `CreateService`, start/stop, and the cross-privilege pipe can
-only be exercised by hand under an elevated token. This is the script to run on a real machine after a
-build. The GUI still ships **elevated** in this milestone (de-elevation is Phase 5), so every step here is
-run As Administrator.
+The dev/CI shell is **non-elevated**, so `CreateService`, start/stop, the cross-privilege pipe, and the
+UAC relaunches can only be exercised by hand. This is the script to run on a real machine after a build.
+As of Phase 5 the GUI ships **`asInvoker`** (unelevated); indexing is done by the LocalSystem service,
+and the few admin operations relaunch elevated on demand.
 
-Service name: **`AllTheThingsSvc`**  ·  Pipe: `\\.\pipe\AllTheThings`  ·  Service binPath: `<exe> --service`
+Service: **`AllTheThingsSvc`** (LocalSystem, auto-start) · Pipe: `\\.\pipe\AllTheThings` (query-only, AU) ·
+Service binPath: `<exe> --service` · Logon task: `AllTheThings` (`/rl highest`, fallback + auto-launch)
 
-## 0. Build the binary to test
+## 1. Fresh install (the main path)
 
+1. Run `AllTheThings_0.7.0_x64-setup.exe` (it self-elevates). The installer runs `--svc-install` +
+   `--svc-start` and registers the logon task.
+2. Confirm the service:
+   ```powershell
+   sc query AllTheThingsSvc      # STATE: 4 RUNNING
+   sc qc AllTheThingsSvc         # BINARY_PATH_NAME ... \AllTheThings.exe --service ; AUTO_START ; LocalSystem
+   ```
+3. Launch the app **from the Start Menu** (a normal, *unelevated* launch). In Task Manager → Details, add
+   the **Elevated** column: `AllTheThings.exe` should read **No**.
+4. Status bar reads `Ready · N items … · via service`. Searches work — **with no UAC prompt at launch**.
+
+## 2. Manage the service from the unelevated GUI (UAC on demand)
+
+Open **Settings (⚙)** → **Background index service** row (hint should mention "Managing it prompts for admin").
+
+- **Stop** → a **UAC prompt** appears → accept → row shows `Installed · stopped`; `sc query` → `STOPPED`.
+  The running GUI (still bound to the service this session) now shows a **degraded** status
+  (`Index error: background service unavailable …`) — by design (no mid-session re-index).
+- **Start** → UAC → `Running`.
+- **Uninstall** → UAC → `Not installed`; `sc query AllTheThingsSvc` → `(1060) does not exist`.
+- **Install** → UAC → `Installed · stopped` → **Start** → `Running`.
+- Decline a UAC prompt once → the action reports "elevation was declined" and the row reconciles to the
+  unchanged real state (no stale UI).
+
+## 3. Unelevated with no service (fallbacks)
+
+1. Uninstall the service (step 2) and fully quit the app (tray → Quit).
+2. Relaunch **from the Start Menu** (unelevated). Status shows: *couldn't read the NTFS volumes (…) —
+   install the background service in Settings, or launch AllTheThings as administrator.* (No crash.)
+3. Settings → **Install** → UAC → install, then **Start** → restart the app → `· via service` again.
+4. Elevated fallback: with the service uninstalled, either let the **logon task** launch it at next
+   sign-in, or right-click → **Run as administrator**. An elevated GUI indexes **in-process** and works
+   without the service. (When the service *is* present, an elevated GUI still uses it — no double-index.)
+
+## 4. "Start with Windows" toggle (now needs UAC)
+
+Settings → toggle **Start with Windows** off, then on. Each change should trigger a **UAC prompt**
+(the task uses `/rl highest`). Verify: `schtasks /query /tn AllTheThings` exists/absent accordingly.
+Toggling **Close to tray** must **not** prompt (no task change).
+
+## 5. Migration nudge (auto-updated installs)
+
+Simulate an install that has the task but not the service:
 ```powershell
-# from the repo root, non-elevated is fine for the build itself
-npm run tauri build           # release installer + exe, OR:
-cargo build --manifest-path src-tauri/Cargo.toml   # debug exe at src-tauri/target/debug/allthethings.exe
+schtasks /create /tn "AllTheThings" /tr "\"C:\Path\AllTheThings.exe\" --minimized" /sc onlogon /rl highest /f
+# ensure the service is NOT installed; delete the marker so the prompt can show:
+Remove-Item "$env:LOCALAPPDATA\AllTheThings\.service-prompted" -ErrorAction SilentlyContinue
 ```
+Launch the app unelevated. After ~3 s a banner appears: *AllTheThings can now index in the background
+without admin. Install the service?* → **Install service** → UAC → installs + starts. Relaunch the app:
+the banner must **not** reappear (one-time; marker file written).
 
-Note the exe path you'll test (installed `...\AllTheThings\AllTheThings.exe`, or the `target` exe).
+## 6. Upgrade in place
 
-## 1. Register + start the service via the GUI (elevated)
+Install v0.6.0, then run the v0.7.0 installer over it (or let auto-update do it). Confirm: **no stray GUI
+window** pops up during install/uninstall, the service ends up **running**, and the upgraded app launches
+**unelevated** with `· via service`.
 
-1. Launch the GUI **As Administrator**. It indexes in-process (no service yet) — status bar reads
-   `Ready · N items …` with **no** `· via service` suffix.
-2. Open **Settings (⚙)** → the **Background index service** row should read **Not installed** with an
-   **Install** button.
-3. Click **Install** → the row reconciles to **Installed · stopped** (Uninstall + Start appear).
-4. Click **Start** → it should settle on **Running** (it may flash *Starting…*).
+## 7. CLI one-shots (no window, exit code only)
 
-## 2. Confirm the service is real (elevated PowerShell)
-
+From an **elevated** PowerShell:
 ```powershell
-sc query AllTheThingsSvc
-# expect: STATE : 4  RUNNING
-sc qc AllTheThingsSvc
-# expect: BINARY_PATH_NAME ... AllTheThings.exe --service ; START_TYPE : 2 AUTO_START ;
-#         SERVICE_START_NAME : LocalSystem
-Get-CimInstance Win32_Service -Filter "Name='AllTheThingsSvc'" | Select Name,State,StartMode,StartName
+& 'C:\...\AllTheThings.exe' --svc-install ;  $LASTEXITCODE   # 0
+& 'C:\...\AllTheThings.exe' --svc-start   ;  $LASTEXITCODE   # 0
+& 'C:\...\AllTheThings.exe' --svc-stop    ;  $LASTEXITCODE
+& 'C:\...\AllTheThings.exe' --svc-uninstall
+& 'C:\...\AllTheThings.exe' --task-install ; & 'C:\...\AllTheThings.exe' --task-uninstall
 ```
-
-Optional pipe sanity check (the DACL grants Authenticated Users, so this works even from a **non**-elevated
-shell once the service is running):
-
-```powershell
-# should NOT throw; a successful open proves the pipe exists and AU may connect
-$h = [System.IO.File]::Open('\\.\pipe\AllTheThings','Open','ReadWrite','None'); $h.Close()
-```
-
-## 3. Confirm the GUI uses the service
-
-1. **Fully quit** the GUI (tray → Quit) and relaunch it **As Administrator**. The backend is chosen at
-   launch, so it must be restarted to pick up the now-running service.
-2. Status bar should now read `Ready · N items … · **via service**`.
-3. Run a few searches — results, counts, and timing should match in-process behaviour.
-4. In **Settings**, the service row should read **Running · in use**, and the hint should say search is
-   served by the service.
-
-## 4. Manage from Settings
-
-- **Stop** → row settles on **Installed · stopped**; `sc query AllTheThingsSvc` shows `STOPPED`. The GUI
-  (still pointed at the service for this session) should now show a **degraded** status
-  (`Index error: background service unavailable …`) rather than silently re-indexing — that is by design
-  (no mid-session fallback).
-- **Start** again → back to **Running**.
-- **Uninstall** → row returns to **Not installed**; `sc query AllTheThingsSvc` reports
-  `(1060) … does not exist`. Relaunching the GUI then indexes in-process again (no `· via service`).
-
-## 5. Negative / robustness checks (optional)
-
-- Run `AllTheThings.exe --service` **from a console** (not via SCM): it should exit quietly (the SCM
-  dispatcher connect fails) — **no** window, no hang.
-- With the service **uninstalled**, launch the GUI: startup must not stall waiting for a pipe (fast
-  fall-back to in-process) and search must work.
-- While the service is **Running**, try **Install** again in Settings: it stays consistent (idempotent),
-  no spurious error.
+Each must run **without opening a window** and exit 0 on success. Running `--service` from a console (not
+the SCM) must also exit quietly with no window.
 
 ## What "pass" looks like
 
-`sc query` shows `RUNNING` with binPath `… --service` under `LocalSystem`; the GUI shows `· via service`
-after a restart; Stop/Start/Uninstall from Settings track `sc query` exactly; stopping the service
-degrades (not crashes) the GUI; and `--service` from a console exits cleanly.
+Fresh install → `sc query` RUNNING, app launches **unelevated** (Elevated = No) and shows `· via service`,
+**no UAC at launch**; Settings management each triggers one UAC prompt and tracks `sc query`; declining UAC
+degrades gracefully; with no service the GUI guides you to install it or run elevated, and the elevated
+logon task still indexes in-process; the migration banner appears once; and an upgrade leaves the service
+running with no stray window.

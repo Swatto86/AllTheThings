@@ -19,8 +19,9 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use presentation::commands::{
     delete_path, export_results, file_icon, file_type, get_settings, index_status, install_service,
-    open_path, rename_path, reveal_path, search, service_status, set_settings, shell_action,
-    start_hidden, start_service, stop_service, uninstall_service, uses_service,
+    is_elevated, mark_service_prompt_seen, open_path, rename_path, reveal_path, search,
+    service_status, set_settings, setup_service, shell_action, start_hidden, start_service,
+    stop_service, uninstall_service, uses_service,
 };
 use presentation::settings::{self, SettingsState, StartFlags};
 use presentation::state::AppState;
@@ -30,6 +31,54 @@ use presentation::state::AppState;
 /// failure (e.g. launched outside the SCM) just returns and the process exits.
 pub fn run_service() {
     let _ = infrastructure::service::host::run();
+}
+
+/// Run a one-shot admin command (used by the elevated relaunch and the NSIS
+/// installer): the `--svc-*` service-management actions and the `--task-*` logon
+/// scheduled-task actions, which both need elevation. Returns `Some(exit_code)`
+/// (0 success, 1 failure) for a recognized command, or `None` for an unrecognized
+/// one so the caller can fall through to the normal GUI rather than exit silently.
+pub fn run_admin_command(arg: &str) -> Option<i32> {
+    use infrastructure::service::scm;
+    use infrastructure::startup;
+    let result = match arg {
+        "--svc-install" => scm::install(),
+        "--svc-uninstall" => scm::uninstall(),
+        "--svc-start" => scm::start(),
+        "--svc-stop" => scm::stop(),
+        // Install + start in one elevated process, so adopting the service from
+        // the migration banner costs a single UAC prompt, not two.
+        "--svc-setup" => scm::install().and_then(|()| scm::start()),
+        "--task-install" => std::env::current_exe()
+            .map_err(|e| e.to_string())
+            .and_then(|exe| startup::register(&exe.to_string_lossy())),
+        "--task-uninstall" => startup::unregister(),
+        _ => return None,
+    };
+    Some(i32::from(result.is_err()))
+}
+
+/// One-time nudge for auto-updated installs that still rely on the elevated
+/// logon task: if the service isn't installed but the logon task is, suggest
+/// adopting the service (so the GUI can run unelevated). Shown at most once; the
+/// checks run off the UI thread so they never delay startup.
+fn maybe_suggest_service(app: &AppHandle) {
+    if settings::service_prompt_seen() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use infrastructure::service::scm::{self, SvcState};
+        let has_task = infrastructure::startup::task_exists();
+        let no_service = matches!(scm::status(), Ok(SvcState::NotInstalled));
+        if has_task && no_service {
+            std::thread::sleep(std::time::Duration::from_millis(3000));
+            // The frontend marks the prompt seen only when it actually shows the
+            // banner, so a lost or too-early emit doesn't permanently consume the
+            // one-time nudge.
+            let _ = app.emit("suggest-service", ());
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -68,6 +117,7 @@ pub fn run() {
                     });
                 }
             }
+            maybe_suggest_service(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -103,7 +153,10 @@ pub fn run() {
             install_service,
             uninstall_service,
             start_service,
-            stop_service
+            stop_service,
+            setup_service,
+            mark_service_prompt_seen,
+            is_elevated
         ])
         .run(tauri::generate_context!())
         .expect("error while running AllTheThings");

@@ -89,9 +89,7 @@ impl Indexer {
             *drives_slot.write() = drives.clone();
 
             if drives.is_empty() {
-                *phase.write() = Phase::Error(
-                    "no fixed NTFS volumes found — run AllTheThings as Administrator".into(),
-                );
+                *phase.write() = Phase::Error("no fixed NTFS volumes found".into());
                 return;
             }
 
@@ -133,7 +131,12 @@ impl Indexer {
             *scanning.write() = String::new();
             progress.store(0, Ordering::Relaxed);
             *phase.write() = if indexed.is_empty() {
-                Phase::Error(last_error)
+                // The usual cause now is an unelevated GUI with no service to
+                // read the volumes for it — point at both ways out.
+                Phase::Error(format!(
+                    "couldn't read the NTFS volumes ({last_error}) — install the background \
+                     service in Settings, or launch AllTheThings as administrator"
+                ))
             } else {
                 Phase::Ready
             };

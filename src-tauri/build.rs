@@ -1,6 +1,7 @@
 fn main() {
-    // Embed a Windows manifest that forces elevation (requireAdministrator) so
-    // launching the app always prompts for UAC — raw NTFS volume access needs it.
+    // Embed a Windows manifest. The app runs `asInvoker` (unelevated): indexing
+    // is delegated to the optional LocalSystem service, and the few operations
+    // that need admin relaunch elevated on demand.
     let windows =
         tauri_build::WindowsAttributes::new().app_manifest(include_str!("AllTheThings.manifest"));
     tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows))

@@ -42,6 +42,34 @@ fn settings_path() -> Option<PathBuf> {
     )
 }
 
+/// Marker that the one-time service-migration prompt has been shown. Kept as a
+/// separate file rather than a [`Settings`] field, because the frontend
+/// overwrites the whole settings object on save and would otherwise clear it.
+fn migration_marker_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(base)
+            .join("AllTheThings")
+            .join(".service-prompted"),
+    )
+}
+
+/// Whether the service-migration prompt has already been shown (or can't be
+/// tracked, in which case we don't nag).
+pub fn service_prompt_seen() -> bool {
+    migration_marker_path().map(|p| p.exists()).unwrap_or(true)
+}
+
+/// Record that the service-migration prompt has been shown.
+pub fn mark_service_prompt_seen() {
+    if let Some(path) = migration_marker_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, b"1");
+    }
+}
+
 pub fn load() -> Settings {
     settings_path()
         .and_then(|p| std::fs::read(p).ok())

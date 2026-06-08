@@ -28,8 +28,8 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Single-instance**: launching again focuses the running window.
 - **System tray**: minimise/close to tray; Show / Settings / Quit menu; left-click to restore.
 - **Auto-updates**: on launch it checks GitHub Releases for a newer **signed** build; an in-app banner offers one-click *Install & restart*. Also available from Settings → *Check now*.
-- **Run at startup** (Settings): registers an elevated logon scheduled task so it auto-starts with admin rights into the tray and indexes in the background — no UAC prompt. The installer sets this up too.
-- **Optional background service** (Settings): install a LocalSystem Windows service (`AllTheThingsSvc`) that indexes in the background; while it's running the app queries it over a local named pipe instead of indexing in-process (the status bar shows *· via service*). The pipe is **query-only** and same-machine — all file actions (open/rename/delete/…) still run in your own user context, never the service's. Install / start / stop / uninstall straight from Settings (requires elevation). The GUI still requires Administrator for now; running it fully unelevated lands in a later release.
+- **Runs without admin** — indexing is delegated to a **background service** (`AllTheThingsSvc`, LocalSystem) that the installer registers and starts; the GUI runs `asInvoker` (unelevated) and queries it over a **query-only**, same-machine named pipe (the status bar shows *· via service*). All file actions (open/rename/delete/…) run in **your own** user context, never the service's. Manage the service (install / start / stop / uninstall) from **Settings** — a UAC prompt appears only when the GUI isn't already elevated.
+- **Run at startup** (Settings): registers a logon scheduled task that auto-launches the app into the tray at sign-in. It runs elevated (`/rl highest`) so it can also index **in-process as a fallback** when the service isn't available.
 - **Settings**: start-with-Windows, optional background-service management, and close-to-tray, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
 - **Keyboard**: type to filter, ↑/↓ to move, Enter to open.
 
@@ -41,14 +41,14 @@ Working build with daily-driver parity. The USN journal carries no size or full 
 
 ## Download & install
 
-Grab the latest installer from the [**Releases**](https://github.com/Swatto86/AllTheThings/releases) page (`AllTheThings_<version>_x64-setup.exe`) and run it — it requests Administrator and registers an elevated logon task so the app auto-starts into the system tray and indexes in the background. Uninstalling removes the task.
+Grab the latest installer from the [**Releases**](https://github.com/Swatto86/AllTheThings/releases) page (`AllTheThings_<version>_x64-setup.exe`) and run it — it installs and starts the background index **service**, registers an elevated logon task (auto-launch into the tray + fallback indexer), and the app itself then runs **without admin**. Uninstalling removes both.
 
 Releases are built automatically by the [release workflow](.github/workflows/release.yml): **publish a GitHub release** for a `vX.Y.Z` tag (UI or `gh release create vX.Y.Z --generate-notes`) and the installer is built and attached to it. See [Releasing](#releasing) below.
 
 ## Requirements
 
 - Windows with at least one **NTFS** volume
-- **Administrator** rights — reading the raw volume is privileged. The app ships with a `requireAdministrator` manifest, so launching it always prompts for UAC (the logon task elevates silently); there's no way to run it unelevated.
+- **No admin to run** once the background service is installed (the installer does this). The GUI ships `asInvoker`; admin is requested (via UAC) only to install or manage the service — or, with no service present, the elevated logon task indexes in-process as a fallback. Reading the raw volume is itself privileged, which is exactly why the LocalSystem service does it on the GUI's behalf.
 - Rust (pinned to 1.95.0 via `rust-toolchain.toml`) and Node 20+
 
 ## Verify the engine (no GUI)
@@ -65,10 +65,10 @@ It indexes every NTFS volume and checks hardlink paths, wildcards, the `ext:`/`f
 
 ```powershell
 npm install
-npm run tauri dev      # launch the app (run the terminal As Administrator)
+npm run tauri dev      # launch the app
 ```
 
-If not elevated, the status bar shows an access-denied error and results stay empty.
+In a dev build there's no installer to set up the service, so the unelevated GUI has nothing to read the volumes for it: either install the service once (`AllTheThings.exe --svc-install` from an elevated shell, or the Settings button), or run the terminal **As Administrator** so it indexes in-process. Without either, the status bar shows an access-denied error and results stay empty.
 
 ## Build an installer
 
