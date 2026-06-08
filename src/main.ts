@@ -4,7 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 import "./styles.css";
+
+const WEBSITE_URL = "https://swatto.co.uk";
 
 // ---- Backend contract (mirrors src-tauri presentation DTOs) ----
 interface Hit {
@@ -179,6 +183,10 @@ app.innerHTML = /* html */ `
       </div>
     </div>
     <div class="flex items-center gap-2 p-2 border-b border-base-300">
+      <button id="brand" title="About AllTheThings" class="toolbar-brand">
+        <span class="brand-name">AllTheThings</span>
+        <span id="brand-version" class="brand-version"></span>
+      </button>
       <input id="q" type="text" placeholder="Search all the things…" autocomplete="off" spellcheck="false"
         class="input input-bordered input-sm flex-1 font-mono" />
       <div class="relative">
@@ -331,6 +339,25 @@ app.innerHTML = /* html */ `
       </div>
     </div>
   </div>
+  <div id="about-overlay" class="overlay hidden">
+    <div class="settings-panel about-panel">
+      <div class="about-body">
+        <div class="about-logo">🔎</div>
+        <div class="about-name">AllTheThings</div>
+        <div id="about-version" class="about-version"></div>
+        <div class="about-tagline">Instant file search for Windows</div>
+      </div>
+      <div class="settings-row">
+        <span>Developer</span>
+        <span>Swatto</span>
+      </div>
+      <div class="settings-row">
+        <span>Website</span>
+        <a id="about-website" href="https://swatto.co.uk" class="about-link">swatto.co.uk</a>
+      </div>
+      <div class="settings-actions"><button id="about-close" class="btn btn-sm">Close</button></div>
+    </div>
+  </div>
   <input id="rename-input" class="rename-input hidden" spellcheck="false" autocomplete="off" />
 `;
 
@@ -356,6 +383,12 @@ const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
 const foldersFirstBtn = document.querySelector<HTMLButtonElement>("#folders-first")!;
 const exportBtn = document.querySelector<HTMLButtonElement>("#export")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
+const brand = document.querySelector<HTMLButtonElement>("#brand")!;
+const brandVersion = document.querySelector<HTMLSpanElement>("#brand-version")!;
+const aboutOverlay = document.querySelector<HTMLDivElement>("#about-overlay")!;
+const aboutVersion = document.querySelector<HTMLDivElement>("#about-version")!;
+const aboutWebsite = document.querySelector<HTMLAnchorElement>("#about-website")!;
+const aboutClose = document.querySelector<HTMLButtonElement>("#about-close")!;
 const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overlay")!;
 const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
@@ -1510,6 +1543,25 @@ function closeSettings(): void {
   settingsOverlay.classList.add("hidden");
 }
 
+function openAbout(): void {
+  closeSettings();
+  closeBuilder();
+  aboutOverlay.classList.remove("hidden");
+}
+
+function closeAbout(): void {
+  aboutOverlay.classList.add("hidden");
+}
+
+// Pull the app version (from tauri.conf.json) into the toolbar brand and the
+// About dialog so both stay in sync with the release without hard-coding.
+getVersion()
+  .then((v) => {
+    brandVersion.textContent = `v${v}`;
+    aboutVersion.textContent = `Version ${v}`;
+  })
+  .catch(() => {});
+
 // ---- Background service ----
 type SvcState =
   | "not_installed"
@@ -1845,6 +1897,12 @@ foldersFirstBtn.addEventListener("click", () => {
 exportBtn.addEventListener("click", exportResults);
 gear.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
+brand.addEventListener("click", openAbout);
+aboutClose.addEventListener("click", closeAbout);
+aboutWebsite.addEventListener("click", (e) => {
+  e.preventDefault(); // open in the user's browser, not the app webview
+  openUrl(WEBSITE_URL).catch(() => {});
+});
 
 // ---- Search builder wiring ----
 builderBtn.addEventListener("click", (e) => {
@@ -1940,6 +1998,9 @@ svcPower.addEventListener("click", () => {
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
+aboutOverlay.addEventListener("click", (e) => {
+  if (e.target === aboutOverlay) closeAbout();
+});
 listen("open-settings", openSettings);
 listen<string>("shell-error", (e) => reportErr(e.payload));
 listen("suggest-service", () => {
@@ -1980,6 +2041,7 @@ window.addEventListener("keydown", (e) => {
     confirmResolve !== null ||
     !settingsOverlay.classList.contains("hidden") ||
     !builderOverlay.classList.contains("hidden") ||
+    !aboutOverlay.classList.contains("hidden") ||
     !confirmOverlay.classList.contains("hidden")
   ) {
     return;
@@ -2009,6 +2071,7 @@ window.addEventListener("keydown", (e) => {
     hideHistory();
     closeSettings();
     closeBuilder();
+    closeAbout();
     if (!confirmOverlay.classList.contains("hidden")) resolveConfirm(false);
   }
 });
