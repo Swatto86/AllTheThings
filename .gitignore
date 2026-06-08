@@ -16,5 +16,6 @@ src-tauri/icons/source.png
 # Editor / OS
 .vscode/
 .idea/
+.claude/
 *.log
 Thumbs.db
