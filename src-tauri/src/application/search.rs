@@ -556,7 +556,10 @@ fn parse_word(
         return Ok(text_pred(v, TextTarget::Path, opts));
     }
 
-    let target = if opts.match_path {
+    // A bare path-like word — one containing a `\` separator or starting with a
+    // drive letter (`C:\Users\…`, `Downloads\report`, `C:`) — matches the full
+    // path, mirroring Everything: typing a folder path lists what's under it.
+    let target = if opts.match_path || looks_like_path(word) {
         *needs_path = true;
         TextTarget::Path
     } else {
@@ -565,9 +568,21 @@ fn parse_word(
     Ok(text_pred(word, target, opts))
 }
 
-/// A quoted phrase is always a literal substring (no functions or wildcards).
+/// Heuristic: does a bare query word look like a filesystem path? True when it
+/// contains a `\` path separator or begins with a drive-letter prefix (`C:`).
+/// Such words are matched against the full path rather than the name alone.
+fn looks_like_path(word: &str) -> bool {
+    if word.contains('\\') {
+        return true;
+    }
+    let mut chars = word.chars();
+    matches!((chars.next(), chars.next()), (Some(c), Some(':')) if c.is_ascii_alphabetic())
+}
+
+/// A quoted phrase is always a literal substring (no functions or wildcards). A
+/// quoted path matches the full path, the same as an unquoted one.
 fn phrase_pred(phrase: &str, opts: &SearchOptions, needs_path: &mut bool) -> Option<Pred> {
-    let target = if opts.match_path {
+    let target = if opts.match_path || looks_like_path(phrase) {
         *needs_path = true;
         TextTarget::Path
     } else {
@@ -950,6 +965,26 @@ mod tests {
         m.eval(&view(name, &name.to_lowercase(), is_dir, size))
     }
 
+    /// Evaluate against an entry that carries a reconstructed full path, so
+    /// path-target predicates can be exercised.
+    fn path_hits(m: &Matcher, full_path: &str) -> bool {
+        let name = full_path.rsplit('\\').next().unwrap_or(full_path);
+        let name_lower = name.to_lowercase();
+        let path_lower = full_path.to_lowercase();
+        m.eval(&EntryView {
+            name,
+            name_lower: &name_lower,
+            path: full_path,
+            path_lower: &path_lower,
+            is_dir: false,
+            size: None,
+            modified_ms: None,
+            created_ms: None,
+            accessed_ms: None,
+            attributes: 0,
+        })
+    }
+
     fn eval_attr(m: &Matcher, attributes: u32) -> bool {
         let mut v = view("x", "x", false, None);
         v.attributes = attributes;
@@ -1012,6 +1047,40 @@ mod tests {
         let m = matcher("");
         assert!(m.matches_all());
         assert!(hits(&m, "anything", false, None));
+    }
+
+    #[test]
+    fn bare_path_query_lists_folder_contents() {
+        // Typing a folder path matches the full path (Everything-style) so the
+        // folder's contents — and descendants — show, not zero results.
+        let m = matcher(r"C:\Users\Swatto\Downloads\");
+        assert!(m.needs_path());
+        assert!(path_hits(&m, r"C:\Users\Swatto\Downloads\report.pdf"));
+        assert!(path_hits(&m, r"C:\Users\Swatto\Downloads\sub\deep.txt"));
+        assert!(!path_hits(&m, r"C:\Users\Swatto\Documents\report.pdf"));
+    }
+
+    #[test]
+    fn drive_letter_query_targets_that_drive() {
+        let m = matcher("c:");
+        assert!(m.needs_path());
+        assert!(path_hits(&m, r"C:\Windows\notepad.exe"));
+    }
+
+    #[test]
+    fn relative_path_fragment_targets_the_path() {
+        let m = matcher(r"Downloads\report");
+        assert!(m.needs_path());
+        assert!(path_hits(&m, r"C:\Users\Swatto\Downloads\report.pdf"));
+        assert!(!path_hits(&m, r"C:\Users\Swatto\Downloads\notes.txt"));
+    }
+
+    #[test]
+    fn plain_word_still_matches_name_only() {
+        // Regression guard: an ordinary term must not switch to path matching.
+        let m = matcher("report");
+        assert!(!m.needs_path());
+        assert!(hits(&m, "report.pdf", false, None));
     }
 
     #[test]
