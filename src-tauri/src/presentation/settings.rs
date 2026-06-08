@@ -94,5 +94,13 @@ pub fn save(settings: &Settings) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let json = serde_json::to_vec_pretty(settings).map_err(io::Error::other)?;
-    std::fs::write(path, json)
+    // Write to a temp file then atomically rename over the target. A crash, power
+    // loss, or full disk mid-write would otherwise truncate settings.json, and
+    // load() parses any malformed file as a failure that silently reverts EVERY
+    // setting to defaults (re-enabling close-to-tray, resetting the hotkey).
+    let mut tmp = path.clone().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)
 }

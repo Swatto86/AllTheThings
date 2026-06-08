@@ -24,6 +24,10 @@ use super::state::AppState;
 /// Search via the active backend (the service, or the in-process index).
 #[tauri::command]
 pub fn search(state: State<'_, AppState>, options: SearchOptions) -> SearchResult {
+    // Switching to a plain search means any in-flight content scan's result would
+    // be discarded — bump the generation so it abandons early instead of reading
+    // tens of thousands of file bodies to completion in the background.
+    state.next_content_gen();
     state.search(&options)
 }
 
@@ -57,6 +61,8 @@ pub async fn search_content(
     // look for a literal "content:" and wrongly return nothing. Run off the
     // async worker too, so a blocking pipe round-trip never occupies it.
     if terms.is_empty() {
+        // Dropped the content term — abandon any prior in-flight content scan too.
+        state.next_content_gen();
         let mut opts = options;
         opts.query = clean_query;
         return tauri::async_runtime::spawn_blocking(move || handle.search(&opts))
@@ -124,13 +130,14 @@ pub struct ExportSummary {
 /// Export the current results to `path` as `format` (`csv`/`txt`/`efu`), re-running
 /// the search unbounded (up to [`EXPORT_CAP`]).
 #[tauri::command]
-pub fn export_results(
+pub async fn export_results(
     state: State<'_, AppState>,
     options: SearchOptions,
     format: String,
     path: String,
 ) -> Result<ExportSummary, String> {
     let fmt = ExportFormat::parse(&format).ok_or_else(|| format!("unknown format '{format}'"))?;
+    let handle = state.search_handle();
     let (clean_query, terms) = extract_content(&options.query);
     let content_search = !terms.is_empty();
 
@@ -144,30 +151,37 @@ pub fn export_results(
         EXPORT_CAP
     };
 
-    let mut result = state.search(&opts);
-    if let Some(e) = result.error {
-        return Err(e);
-    }
-    // For a content export the candidate pool (and thus the scan) is capped; the
-    // pre-filter total is the only signal that files were dropped, so capture it
-    // before overwriting `total` with the post-filter match count.
-    let content_capped = content_search && result.total > CONTENT_CANDIDATE_CAP;
-    if content_search {
-        let never_cancel = || false;
-        result.hits =
-            content::filter_by_content(result.hits, &terms, opts.match_case, &never_cancel);
-        result.total = result.hits.len();
-    }
+    // Run the whole export — index search, content scan, and disk write — off the
+    // async worker via spawn_blocking, so a large export never freezes the UI
+    // thread (mirrors search_content; file bodies are read in our user token).
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut result = handle.search(&opts);
+        if let Some(e) = result.error {
+            return Err(e);
+        }
+        // For a content export the candidate pool (and thus the scan) is capped;
+        // the pre-filter total is the only signal that files were dropped, so
+        // capture it before overwriting `total` with the post-filter match count.
+        let content_capped = content_search && result.total > CONTENT_CANDIDATE_CAP;
+        if content_search {
+            let never_cancel = || false;
+            result.hits =
+                content::filter_by_content(result.hits, &terms, opts.match_case, &never_cancel);
+            result.total = result.hits.len();
+        }
 
-    let file = File::create(&path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(file);
-    export::write_export(&result.hits, fmt, &mut writer).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())?;
-    Ok(ExportSummary {
-        written: result.hits.len(),
-        total: result.total,
-        capped: content_capped,
+        let file = File::create(&path).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        export::write_export(&result.hits, fmt, &mut writer).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        Ok(ExportSummary {
+            written: result.hits.len(),
+            total: result.total,
+            capped: content_capped,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Open a file or folder with its default handler.
@@ -205,38 +219,66 @@ pub fn get_settings(state: State<'_, SettingsState>) -> Settings {
 /// global hotkey is owned by `set_hotkey` and preserved here untouched.
 #[tauri::command]
 pub fn set_settings(state: State<'_, SettingsState>, mut settings: Settings) -> Result<(), String> {
-    // The logon task uses `/rl highest`, which needs admin to create or delete.
-    // Only touch it when the toggle actually changed (reconciled from the real
-    // task), and relaunch elevated when the GUI isn't — mirroring the service
-    // commands — so an unelevated GUI can still manage it.
+    // Apply the two external side effects, but capture the FIRST error rather than
+    // returning early: we must still reconcile and persist below, so a failure in
+    // one step never silently discards the user's other changes (e.g.
+    // close_to_tray) or leaves memory/disk disagreeing with the real system.
+    let mut side_effect_err: Option<String> = None;
+
+    // Creating/deleting the logon task needs admin (tasks under the root folder
+    // require it). Only touch it when the toggle actually changed (reconciled
+    // from the real task), and relaunch elevated when the GUI isn't — mirroring
+    // the service commands — so an unelevated GUI can still manage it.
     if settings.run_at_startup != startup::task_exists() {
-        if elevation::is_elevated() {
-            apply_startup_task(settings.run_at_startup)?;
+        let r = if elevation::is_elevated() {
+            apply_startup_task(settings.run_at_startup)
         } else {
             let arg = if settings.run_at_startup {
                 "--task-install"
             } else {
                 "--task-uninstall"
             };
-            elevation::run_elevated(arg)?;
+            elevation::run_elevated(arg)
+        };
+        if let Err(e) = r {
+            side_effect_err = Some(e);
         }
     }
 
     // The Explorer "Search here" entry lives under HKCU — no elevation needed.
     if settings.explorer_menu != shellmenu::is_registered() {
-        if settings.explorer_menu {
-            shellmenu::register()?;
+        let r = if settings.explorer_menu {
+            shellmenu::register()
         } else {
-            shellmenu::unregister()?;
+            shellmenu::unregister()
+        };
+        if let Err(e) = r {
+            side_effect_err.get_or_insert(e);
         }
     }
 
-    // `hotkey` is owned by `set_hotkey` (it also (re)registers the shortcut), so
-    // keep the stored value rather than whatever the settings payload carries.
-    settings.hotkey = state.0.read().hotkey.clone();
-    *state.0.write() = settings.clone();
-    settings::save(&settings).map_err(|e| e.to_string())?;
-    Ok(())
+    // Reconcile the externally-backed toggles from reality so a failed/half-applied
+    // side effect never leaves a stale stored value, then persist — even on a
+    // side-effect error — so non-external fields (close_to_tray) are not lost.
+    settings.run_at_startup = startup::task_exists();
+    settings.explorer_menu = shellmenu::is_registered();
+    {
+        // One write guard so preserving `hotkey` (owned by set_hotkey, which also
+        // (re)registers the shortcut) is atomic w.r.t. a concurrent set_hotkey —
+        // a read-then-separate-write could lose that update.
+        let mut guard = state.0.write();
+        settings.hotkey = guard.hotkey.clone();
+        *guard = settings.clone();
+    }
+    let save_res = settings::save(&settings).map_err(|e| e.to_string());
+
+    // Surface the side-effect error first: it occurred first and an
+    // elevation/registry failure is usually more actionable than a save error.
+    // Either way the reconciled state was already persisted above.
+    match side_effect_err {
+        Some(e) => Err(e),
+        None => save_res,
+    }
 }
 
 /// Set (and live-register) the global summon hotkey. An empty accelerator
