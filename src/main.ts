@@ -22,6 +22,7 @@ interface SearchResponse {
   tookMs: number;
   hits: Hit[];
   error?: string;
+  capped?: boolean; // content search: candidate pool truncated (partial scan)
 }
 interface IndexStatus {
   state: "indexing" | "ready" | "error";
@@ -370,6 +371,17 @@ function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
+// Whether the query asks to search inside file contents.
+const HAS_CONTENT = /(^|\s)content:/i;
+// Remove `content:term` / `content:"phrase"` so the rest can be highlighted /
+// routed as a filename query (the content term matches bodies, not names).
+function stripContent(query: string): string {
+  return query
+    .replace(/(^|\s)content:("[^"]*"?|\S*)/gi, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // Plain terms to highlight: quoted phrases and bare words, minus operators,
 // negated terms, ext:/size:/file:/folder: functions, and wildcards.
 function computeHighlightTerms(query: string, regex: boolean): string[] {
@@ -672,9 +684,13 @@ function toggleColumn(key: ColKey): void {
 // ---- Search ----
 async function runSearch(): Promise<void> {
   const seq = ++searchSeq;
-  highlightTerms = computeHighlightTerms(options.query, options.regex);
+  const isContent = HAS_CONTENT.test(options.query);
+  // Highlight only the filename terms; the content term matches bodies, not names.
+  highlightTerms = computeHighlightTerms(stripContent(options.query), options.regex);
   try {
-    const res = await invoke<SearchResponse>("search", { options });
+    // Content search reads files, so it's slower — show that it's working.
+    if (isContent) countEl.textContent = "Searching file contents…";
+    const res = await invoke<SearchResponse>(isContent ? "search_content" : "search", { options });
     if (seq !== searchSeq) return; // superseded
     if (res.error) {
       countEl.textContent = "";
@@ -686,10 +702,11 @@ async function runSearch(): Promise<void> {
     selected = -1;
     spacer.style.height = `${hits.length * ROW_HEIGHT}px`;
     viewport.scrollTop = 0;
-    countEl.textContent = `${total.toLocaleString()} found · ${res.tookMs} ms`;
+    const partial = isContent && res.capped ? " (first 50,000 scanned)" : "";
+    countEl.textContent = `${total.toLocaleString()}${isContent ? " in files" : " found"}${partial} · ${res.tookMs} ms`;
     renderVisible();
   } catch (e) {
-    statusEl.textContent = `Search error: ${e}`;
+    if (seq === searchSeq) statusEl.textContent = `Search error: ${e}`;
   }
 }
 
@@ -1362,11 +1379,13 @@ async function exportResults(): Promise<void> {
   const unknownExt = ext !== "" && ext !== "csv" && ext !== "txt" && ext !== "efu";
   statusEl.textContent = "Exporting…";
   try {
-    const r = await invoke<{ written: number; total: number }>("export_results", { options, format, path });
+    const r = await invoke<{ written: number; total: number; capped: boolean }>("export_results", { options, format, path });
     let msg = `Exported ${r.written.toLocaleString()} items`;
     // The effective cap depends on the backend (the in-process index allows more
     // rows than the service), so report the real numbers rather than a fixed cap.
     if (r.written < r.total) msg += ` (of ${r.total.toLocaleString()}; limited to ${r.written.toLocaleString()})`;
+    // A content export only scans the first 50,000 filename candidates.
+    if (r.capped) msg += " (content scan capped at 50,000 candidates)";
     if (unknownExt) msg += " as CSV";
     statusEl.textContent = `${msg} to ${path}`;
   } catch (e) {

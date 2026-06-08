@@ -13,6 +13,7 @@ use crate::infrastructure::service::framing::{read_frame, write_frame, MAX_RESPO
 use crate::infrastructure::service::pipe::connect;
 
 /// A stateless handle to the background service. Cheap to clone/store.
+#[derive(Clone, Copy)]
 pub struct ServiceClient;
 
 impl ServiceClient {

@@ -40,7 +40,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Functions: `parent:` `child:` `count:` `dupe:` `len:` … | ✅ | ❌ | |
 | Saved searches / macros | ✅ | ❌ | |
 | Match diacritics | ✅ | ❌ | |
-| Content search (`content:`) | ✅ | ❌ | |
+| Content search (`content:`) | ✅ | ✅ | On-demand: the index narrows by filename, then candidate files' bodies are grepped GUI-side (your token; the service never reads contents). Text + BOM'd UTF-16, binary skipped, cancellable. |
 
 ## Results, columns & sorting
 

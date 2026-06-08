@@ -287,6 +287,60 @@ impl Matcher {
     }
 }
 
+/// Pull every `content:term` / `content:"phrase"` out of `query`, returning the
+/// remaining filename/metadata query and the content terms (AND-combined).
+///
+/// Content matching reads file bodies and so is evaluated separately, in the
+/// GUI's user token — never the query-only service — over the candidates the
+/// remaining query narrows to. An empty term (a bare `content:`) is dropped.
+pub fn extract_content(query: &str) -> (String, Vec<String>) {
+    const KW: [char; 8] = ['c', 'o', 'n', 't', 'e', 'n', 't', ':'];
+    let chars: Vec<char> = query.chars().collect();
+    let mut terms = Vec::new();
+    let mut rest = String::with_capacity(query.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        let at_boundary = i == 0 || chars[i - 1].is_whitespace();
+        let is_kw = at_boundary
+            && i + KW.len() <= chars.len()
+            && chars[i..i + KW.len()]
+                .iter()
+                .zip(KW.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b));
+        if !is_kw {
+            rest.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        i += KW.len(); // skip "content:"
+        let term: String = if chars.get(i) == Some(&'"') {
+            i += 1;
+            let start = i;
+            while i < chars.len() && chars[i] != '"' {
+                i += 1;
+            }
+            let t = chars[start..i].iter().collect();
+            if i < chars.len() {
+                i += 1; // closing quote
+            }
+            t
+        } else {
+            let start = i;
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            chars[start..i].iter().collect()
+        };
+        if !term.is_empty() {
+            terms.push(term);
+        }
+    }
+
+    (rest.split_whitespace().collect::<Vec<_>>().join(" "), terms)
+}
+
 /// Split a query into words, quoted phrases, and the `|`/`!` operators. `|`
 /// and `"` cannot appear in NTFS file names, so they are always operators; `!`
 /// is the NOT operator only at the start of a term (so names like `!Locales`
@@ -718,6 +772,27 @@ fn parse_attrib(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_content_pulls_terms_and_cleans_query() {
+        let (rest, terms) =
+            extract_content(r#"*.log content:"error timeout" report content:fatal"#);
+        assert_eq!(rest, "*.log report");
+        assert_eq!(
+            terms,
+            vec!["error timeout".to_string(), "fatal".to_string()]
+        );
+
+        let (rest, terms) = extract_content("just a name search");
+        assert_eq!(rest, "just a name search");
+        assert!(terms.is_empty());
+
+        // A bare `content:` (no term) is dropped; `content` as a substring is not
+        // a function.
+        let (rest, terms) = extract_content("content: mycontent:x report");
+        assert_eq!(rest, "mycontent:x report");
+        assert!(terms.is_empty());
+    }
 
     fn matcher(query: &str) -> Matcher {
         Matcher::compile(&SearchOptions {

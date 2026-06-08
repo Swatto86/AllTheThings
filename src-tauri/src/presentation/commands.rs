@@ -8,11 +8,14 @@ use std::process::Command;
 use tauri::{Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 
+use std::sync::atomic::Ordering;
+
 use crate::application::export::{self, ExportFormat};
+use crate::application::search::extract_content;
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::fileops::{self, ShellVerb};
 use crate::infrastructure::service::scm::{self, SvcState};
-use crate::infrastructure::{elevation, icons, shellmenu, startup};
+use crate::infrastructure::{content, elevation, icons, shellmenu, startup};
 
 use super::hotkey;
 use super::settings::{self, Settings, SettingsState, StartFlags};
@@ -28,6 +31,73 @@ pub fn search(state: State<'_, AppState>, options: SearchOptions) -> SearchResul
 #[tauri::command]
 pub fn index_status(state: State<'_, AppState>) -> IndexStatus {
     state.status()
+}
+
+/// Candidate cap for content search: the index narrows to this many files, whose
+/// bodies are then grepped. Bounds the work — the user narrows by filename to fit
+/// (e.g. `*.log content:"timeout"`); a bare `content:` scans the first N files.
+const CONTENT_CANDIDATE_CAP: usize = 50_000;
+
+/// Search inside files: `content:"term"` keeps the files (matched by the rest of
+/// the query) whose body contains every content term. Two phases — the index
+/// narrows candidates (fast, possibly via the service), then their bodies are
+/// read **in this process's user token** (the query-only service never reads
+/// file contents). Async + a cancellation generation so typing supersedes an
+/// in-flight scan instead of queueing behind it.
+#[tauri::command]
+pub async fn search_content(
+    state: State<'_, AppState>,
+    options: SearchOptions,
+) -> Result<SearchResult, String> {
+    let (clean_query, terms) = extract_content(&options.query);
+    let handle = state.search_handle();
+
+    // No content term yet (e.g. mid-typing a bare `content:`): fall back to a
+    // plain index search on the CLEANED query — searching the raw query would
+    // look for a literal "content:" and wrongly return nothing. Run off the
+    // async worker too, so a blocking pipe round-trip never occupies it.
+    if terms.is_empty() {
+        let mut opts = options;
+        opts.query = clean_query;
+        return tauri::async_runtime::spawn_blocking(move || handle.search(&opts))
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    let generation = state.next_content_gen();
+    let gen_flag = state.content_gen_handle();
+    let mut index_opts = options.clone();
+    index_opts.query = clean_query;
+    index_opts.limit = CONTENT_CANDIDATE_CAP;
+    let display_limit = options.limit;
+    let match_case = options.match_case;
+
+    // Both phases run off the async (tokio) worker via spawn_blocking: the index
+    // round-trip (pipe I/O or a large local scan) AND the file-body reads (always
+    // in this process's user token — the service never reads file contents). The
+    // grep abandons candidates as soon as a newer content search supersedes this.
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let candidates = handle.search(&index_opts);
+        if candidates.error.is_some() {
+            return candidates;
+        }
+        // The filename narrowing matched more files than we'll grep, so the scan
+        // is partial — surfaced so the UI can say so rather than imply complete.
+        let capped = candidates.total > CONTENT_CANDIDATE_CAP;
+        let cancelled = || gen_flag.load(Ordering::SeqCst) != generation;
+        let mut hits = content::filter_by_content(candidates.hits, &terms, match_case, &cancelled);
+        hits.truncate(display_limit);
+        SearchResult {
+            total: hits.len(),
+            took_ms: started.elapsed().as_millis(),
+            hits,
+            error: None,
+            capped,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Whether searches are served by the background service (vs. in-process), for
@@ -47,6 +117,8 @@ const EXPORT_CAP: usize = 1_000_000;
 pub struct ExportSummary {
     pub written: usize,
     pub total: usize,
+    /// A content export whose candidate pool was truncated (incomplete scan).
+    pub capped: bool,
 }
 
 /// Export the current results to `path` as `format` (`csv`/`txt`/`efu`), re-running
@@ -59,12 +131,32 @@ pub fn export_results(
     path: String,
 ) -> Result<ExportSummary, String> {
     let fmt = ExportFormat::parse(&format).ok_or_else(|| format!("unknown format '{format}'"))?;
-    let mut opts = options;
-    opts.limit = EXPORT_CAP;
+    let (clean_query, terms) = extract_content(&options.query);
+    let content_search = !terms.is_empty();
 
-    let result = state.search(&opts);
+    let mut opts = options;
+    opts.query = clean_query;
+    // A content export is bounded by the candidate cap (each file is read), not
+    // the much larger row cap for a pure index export.
+    opts.limit = if content_search {
+        CONTENT_CANDIDATE_CAP
+    } else {
+        EXPORT_CAP
+    };
+
+    let mut result = state.search(&opts);
     if let Some(e) = result.error {
         return Err(e);
+    }
+    // For a content export the candidate pool (and thus the scan) is capped; the
+    // pre-filter total is the only signal that files were dropped, so capture it
+    // before overwriting `total` with the post-filter match count.
+    let content_capped = content_search && result.total > CONTENT_CANDIDATE_CAP;
+    if content_search {
+        let never_cancel = || false;
+        result.hits =
+            content::filter_by_content(result.hits, &terms, opts.match_case, &never_cancel);
+        result.total = result.hits.len();
     }
 
     let file = File::create(&path).map_err(|e| e.to_string())?;
@@ -74,6 +166,7 @@ pub fn export_results(
     Ok(ExportSummary {
         written: result.hits.len(),
         total: result.total,
+        capped: content_capped,
     })
 }
 

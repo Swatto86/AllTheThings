@@ -67,7 +67,7 @@ pub struct Hit {
 }
 
 /// The full response for one search.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SearchResult {
     pub total: usize,
     #[serde(rename = "tookMs")]
@@ -75,15 +75,18 @@ pub struct SearchResult {
     pub hits: Vec<Hit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The result set was truncated (more matched than were returned/scanned).
+    /// Set by content search when the candidate pool hit its cap.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub capped: bool,
 }
 
 impl SearchResult {
     pub fn error(message: String, took_ms: u128) -> Self {
         Self {
-            total: 0,
             took_ms,
-            hits: Vec::new(),
             error: Some(message),
+            ..Self::default()
         }
     }
 }
@@ -212,6 +215,7 @@ impl SearchIndex {
                 took_ms: 0,
                 hits,
                 error: None,
+                capped: false,
             };
         }
 
@@ -232,6 +236,7 @@ impl SearchIndex {
             took_ms: 0,
             hits,
             error: None,
+            capped: false,
         }
     }
 

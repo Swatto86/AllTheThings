@@ -50,6 +50,7 @@ impl Catalog {
                 took_ms: 0,
                 hits: Vec::new(),
                 error: None,
+                capped: false,
             },
             [only] => only.search(opts, &matcher),
             many => {
@@ -64,6 +65,7 @@ impl Catalog {
                     took_ms: 0,
                     hits,
                     error: None,
+                    capped: false,
                 }
             }
         };

@@ -2,6 +2,7 @@
 //! contracts. Windows/NTFS only.
 
 pub mod cache;
+pub mod content;
 pub mod elevation;
 pub mod fileops;
 pub mod icons;

@@ -11,7 +11,11 @@
 //! locally — a mid-session switch would surprise the user with a stale or
 //! differently-scoped index.
 
-use crate::application::{IndexStatus, SearchOptions, SearchResult};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+
+use crate::application::{Catalog, IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::indexing::Indexer;
 use crate::infrastructure::service::client::ServiceClient;
 
@@ -21,6 +25,25 @@ pub enum SearchBackend {
     Service(ServiceClient),
     /// Index in-process and query the local catalog.
     Local(Indexer),
+}
+
+/// A detached, `'static` snapshot of the backend's search capability, so a search
+/// can run off the async (tokio) worker thread via `spawn_blocking` without
+/// borrowing [`crate::presentation::state::AppState`]. Used by content search,
+/// whose backend round-trip (pipe I/O or a large index scan) must not block a
+/// tokio worker.
+pub enum SearchHandle {
+    Service(ServiceClient),
+    Local(Arc<RwLock<Catalog>>),
+}
+
+impl SearchHandle {
+    pub fn search(&self, options: &SearchOptions) -> SearchResult {
+        match self {
+            SearchHandle::Service(client) => client.search(options),
+            SearchHandle::Local(catalog) => catalog.read().search(options),
+        }
+    }
 }
 
 impl SearchBackend {
@@ -56,5 +79,13 @@ impl SearchBackend {
     /// Whether the GUI is querying the background service (for the status bar).
     pub fn uses_service(&self) -> bool {
         matches!(self, SearchBackend::Service(_))
+    }
+
+    /// A detached handle for running a search off the async worker thread.
+    pub fn handle(&self) -> SearchHandle {
+        match self {
+            SearchBackend::Service(client) => SearchHandle::Service(*client),
+            SearchBackend::Local(indexer) => SearchHandle::Local(indexer.catalog()),
+        }
     }
 }

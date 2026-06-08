@@ -20,8 +20,8 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use presentation::commands::{
     delete_path, export_results, file_icon, file_type, get_settings, hotkey_active, index_status,
     initial_search, install_service, is_elevated, mark_service_prompt_seen, open_path, rename_path,
-    reveal_path, search, service_status, set_hotkey, set_settings, setup_service, shell_action,
-    start_hidden, start_service, stop_service, uninstall_service, uses_service,
+    reveal_path, search, search_content, service_status, set_hotkey, set_settings, setup_service,
+    shell_action, start_hidden, start_service, stop_service, uninstall_service, uses_service,
 };
 use presentation::settings::{self, SettingsState, StartFlags};
 use presentation::state::AppState;
@@ -168,6 +168,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search,
+            search_content,
             index_status,
             uses_service,
             open_path,
