@@ -184,11 +184,9 @@ app.innerHTML = /* html */ `
         <button id="sizebtn" title="Filter by size" class="btn btn-xs">Size ▾</button>
         <div id="sizemenu" class="menu-pop hidden"></div>
       </div>
-      <div class="join">
-        <button data-opt="matchCase" title="Match case" class="opt btn btn-xs join-item">Aa</button>
-        <button data-opt="wholeWord" title="Match whole word" class="opt btn btn-xs join-item">W</button>
-        <button data-opt="regex" title="Use regular expression" class="opt btn btn-xs join-item">.*</button>
-        <button data-opt="matchPath" title="Match full path" class="opt btn btn-xs join-item">/</button>
+      <div class="relative">
+        <button id="optbtn" title="Match options" class="btn btn-xs">Options ▾</button>
+        <div id="opt-menu" class="menu-pop hidden"></div>
       </div>
       <button id="folders-first" title="Folders first" class="btn btn-xs">📁</button>
       <button id="export" title="Export results (CSV / TXT / EFU)" class="btn btn-xs">Export</button>
@@ -272,6 +270,8 @@ const confirmCancel = document.querySelector<HTMLButtonElement>("#confirm-cancel
 const renameInput = document.querySelector<HTMLInputElement>("#rename-input")!;
 const sizeBtn = document.querySelector<HTMLButtonElement>("#sizebtn")!;
 const sizeMenu = document.querySelector<HTMLDivElement>("#sizemenu")!;
+const optBtn = document.querySelector<HTMLButtonElement>("#optbtn")!;
+const optMenu = document.querySelector<HTMLDivElement>("#opt-menu")!;
 const historyMenu = document.querySelector<HTMLDivElement>("#history-menu")!;
 const foldersFirstBtn = document.querySelector<HTMLButtonElement>("#folders-first")!;
 const exportBtn = document.querySelector<HTMLButtonElement>("#export")!;
@@ -941,10 +941,39 @@ function hideHistory(): void {
   historyMenu.classList.add("hidden");
 }
 
+// The search match-modes, shown as a ticked checklist in the Options dropdown.
+type MatchKey = "matchCase" | "wholeWord" | "regex" | "matchPath";
+const MATCH_OPTIONS: [MatchKey, string][] = [
+  ["matchCase", "Match case"],
+  ["wholeWord", "Match whole word"],
+  ["regex", "Regular expression"],
+  ["matchPath", "Match full path"],
+];
+
+// Reflect the current options on the toolbar button (highlight + count) and the
+// dropdown's ticks. Called at init and whenever an option changes.
 function syncControls(): void {
-  document.querySelectorAll<HTMLButtonElement>(".opt").forEach((b) => {
-    const on = options[b.dataset.opt as "matchCase" | "wholeWord" | "regex" | "matchPath"];
-    b.classList.toggle("btn-primary", on);
+  const active = MATCH_OPTIONS.filter(([k]) => options[k]).length;
+  optBtn.classList.toggle("btn-primary", active > 0);
+  optBtn.textContent = active > 0 ? `Options (${active}) ▾` : "Options ▾";
+  buildOptMenu();
+}
+
+function buildOptMenu(): void {
+  optMenu.innerHTML = MATCH_OPTIONS.map(
+    ([key, label]) =>
+      `<button data-mk="${key}"><span class="chk">${options[key] ? "✓" : ""}</span>${esc(label)}</button>`,
+  ).join("");
+  optMenu.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+    b.onclick = (e) => {
+      // Keep the menu open so several options can be toggled; stop the bubble so
+      // the window dismiss handler doesn't close it.
+      e.stopPropagation();
+      const key = b.dataset.mk as MatchKey;
+      options[key] = !options[key];
+      syncControls();
+      runSearch();
+    };
   });
 }
 
@@ -1346,20 +1375,26 @@ head.addEventListener("contextmenu", (e) => {
   showColumnPicker(e.clientX, e.clientY);
 });
 
-document.querySelectorAll<HTMLButtonElement>(".opt").forEach((b) => {
-  b.addEventListener("click", () => {
-    const key = b.dataset.opt as "matchCase" | "wholeWord" | "regex" | "matchPath";
-    options[key] = !options[key];
-    syncControls();
-    runSearch();
-    q.focus();
-  });
+optBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = optMenu.classList.contains("hidden");
+  hideMenu();
+  sizeMenu.classList.add("hidden");
+  if (open) {
+    const r = optBtn.getBoundingClientRect();
+    optMenu.style.left = `${Math.min(r.left, window.innerWidth - 200)}px`;
+    optMenu.style.top = `${r.bottom + 4}px`;
+    optMenu.classList.remove("hidden");
+  } else {
+    optMenu.classList.add("hidden");
+  }
 });
 
 sizeBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   const open = sizeMenu.classList.contains("hidden");
   hideMenu();
+  optMenu.classList.add("hidden");
   if (open) {
     const r = sizeBtn.getBoundingClientRect();
     sizeMenu.style.left = `${r.left}px`;
@@ -1517,6 +1552,7 @@ window.addEventListener("click", (e) => {
   if (!menu.contains(e.target as Node)) hideMenu();
   if (!colMenu.contains(e.target as Node)) colMenu.classList.add("hidden");
   if (e.target !== sizeBtn && !sizeMenu.contains(e.target as Node)) sizeMenu.classList.add("hidden");
+  if (e.target !== optBtn && !optMenu.contains(e.target as Node)) optMenu.classList.add("hidden");
   if (e.target !== q && !historyMenu.contains(e.target as Node)) hideHistory();
 });
 window.addEventListener("keydown", (e) => {
@@ -1524,6 +1560,7 @@ window.addEventListener("keydown", (e) => {
     hideMenu();
     colMenu.classList.add("hidden");
     sizeMenu.classList.add("hidden");
+    optMenu.classList.add("hidden");
     hideHistory();
     closeSettings();
     if (!confirmOverlay.classList.contains("hidden")) resolveConfirm(false);
