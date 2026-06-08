@@ -11,10 +11,10 @@
 
 use chrono::{Datelike, Days, Local, Months, NaiveDate, TimeZone};
 use regex::{Regex, RegexBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Which column results are ordered by.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortKey {
     #[default]
@@ -44,8 +44,8 @@ pub struct EntryView<'a> {
     pub attributes: u32,
 }
 
-/// Everything-style search options sent from the UI.
-#[derive(Debug, Clone, Deserialize)]
+/// Everything-style search options sent from the UI (or a service client).
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SearchOptions {
     pub query: String,

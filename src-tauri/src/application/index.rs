@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// `Hit`/`SearchResult` are `Serialize` for the UI and `Deserialize` so a service
+// client can decode them off the IPC pipe.
+
 use crate::application::error::IndexResult;
 use crate::application::indexer::{RawRecord, VolumeEnumerator};
 use crate::application::search::{EntryView, Matcher, SearchOptions, SortKey};
@@ -45,7 +48,7 @@ pub struct EntrySnapshot {
 }
 
 /// One search result row, serialized to the frontend.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hit {
     pub name: String,
     pub path: String,
@@ -64,13 +67,13 @@ pub struct Hit {
 }
 
 /// The full response for one search.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub total: usize,
     #[serde(rename = "tookMs")]
     pub took_ms: u128,
     pub hits: Vec<Hit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 

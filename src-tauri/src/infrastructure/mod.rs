@@ -4,5 +4,7 @@
 pub mod cache;
 pub mod fileops;
 pub mod icons;
+pub mod indexing;
 pub mod ntfs;
+pub mod service;
 pub mod startup;

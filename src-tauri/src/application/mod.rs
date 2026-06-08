@@ -7,6 +7,7 @@ pub mod error;
 pub mod export;
 pub mod index;
 pub mod indexer;
+pub mod ipc;
 pub mod search;
 pub mod status;
 

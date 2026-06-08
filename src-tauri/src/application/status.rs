@@ -1,9 +1,9 @@
 //! Index lifecycle status, surfaced to the UI via a Tauri command.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A snapshot of the index's state for the frontend status bar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexStatus {
     /// One of `"indexing"`, `"ready"`, `"error"`.
     pub state: String,
