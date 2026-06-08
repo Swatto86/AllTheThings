@@ -1,8 +1,10 @@
 //! Search options and the compiled query matcher.
 //!
 //! The query language mirrors voidtools Everything: space-separated terms are
-//! AND-combined, `|` is OR, `!` negates the following term, and `"quoted"`
-//! text is a literal phrase (escaping the operators). `*`/`?` wildcards,
+//! AND-combined, `|` is OR, `!` negates the following term, `( … )` groups a
+//! sub-expression (so `a (b | c)` is `a AND (b OR c)`), and `"quoted"` text is
+//! a literal phrase (escaping the operators — including parentheses). `*`/`?`
+//! wildcards,
 //! whole-word and regex modes, case sensitivity, full-path matching, and the
 //! `ext:`, `path:`, `file:`, `folder:`, `size:`, `dm:`/`dc:`/`da:` (modified /
 //! created / accessed dates) and `attrib:` functions are all supported as leaf
@@ -129,21 +131,20 @@ enum Pred {
     Folder,
 }
 
-/// A predicate plus optional negation (`!`).
-struct Leaf {
-    negate: bool,
-    pred: Pred,
+/// A node in the compiled boolean expression tree. Leaves are predicates;
+/// interior nodes combine them with AND / OR / NOT. Parenthesised groups in the
+/// query nest as further `And`/`Or` nodes.
+enum Expr {
+    Pred(Pred),
+    Not(Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
 }
 
-/// A conjunction — all leaves must match (AND).
-struct Conjunction {
-    leaves: Vec<Leaf>,
-}
-
-/// A compiled query: a disjunction of conjunctions (OR of ANDs). An empty set
-/// of clauses matches everything.
+/// A compiled query: a boolean expression tree, or `None` when nothing
+/// constrains the result set (an empty query matches everything).
 pub struct Matcher {
-    clauses: Vec<Conjunction>,
+    root: Option<Expr>,
     match_case: bool,
     needs_path: bool,
 }
@@ -153,6 +154,8 @@ enum Token {
     Phrase(String),
     Or,
     Not,
+    LParen,
+    RParen,
 }
 
 impl Matcher {
@@ -166,7 +169,7 @@ impl Matcher {
             let query = opts.query.trim();
             if query.is_empty() {
                 return Ok(Self {
-                    clauses: Vec::new(),
+                    root: None,
                     match_case: case,
                     needs_path: false,
                 });
@@ -176,61 +179,36 @@ impl Matcher {
             } else {
                 TextTarget::Name
             };
-            let leaf = Leaf {
-                negate: false,
-                pred: Pred::Text {
-                    target,
-                    kind: TextKind::Re(build_regex(query, case)?),
-                },
+            let pred = Pred::Text {
+                target,
+                kind: TextKind::Re(build_regex(query, case)?),
             };
             return Ok(Self {
-                clauses: vec![Conjunction { leaves: vec![leaf] }],
+                root: Some(Expr::Pred(pred)),
                 match_case: case,
                 needs_path: opts.match_path,
             });
         }
 
-        let mut needs_path = false;
-        let mut clauses: Vec<Conjunction> = Vec::new();
-        let mut current: Vec<Leaf> = Vec::new();
-        let mut negate = false;
-
-        for token in tokenize(&opts.query) {
-            match token {
-                Token::Or => {
-                    clauses.push(Conjunction {
-                        leaves: std::mem::take(&mut current),
-                    });
-                    negate = false;
-                }
-                Token::Not => negate = !negate,
-                Token::Word(word) => {
-                    if let Some(pred) = parse_word(&word, opts, &mut needs_path)? {
-                        current.push(Leaf { negate, pred });
-                    }
-                    negate = false;
-                }
-                Token::Phrase(phrase) => {
-                    if let Some(pred) = phrase_pred(&phrase, opts, &mut needs_path) {
-                        current.push(Leaf { negate, pred });
-                    }
-                    negate = false;
-                }
-            }
-        }
-        clauses.push(Conjunction { leaves: current });
-        clauses.retain(|c| !c.leaves.is_empty());
+        let tokens = tokenize(&opts.query);
+        let mut parser = Parser {
+            tokens: &tokens,
+            pos: 0,
+            opts,
+            needs_path: false,
+        };
+        let root = parser.parse_or(0)?;
 
         Ok(Self {
-            clauses,
+            root,
             match_case: case,
-            needs_path,
+            needs_path: parser.needs_path,
         })
     }
 
     /// True when nothing constrains the result set (so every entry matches).
     pub fn matches_all(&self) -> bool {
-        self.clauses.is_empty()
+        self.root.is_none()
     }
 
     /// Whether matching requires the reconstructed full path.
@@ -241,15 +219,19 @@ impl Matcher {
     /// Test one entry. `e.path`/`e.path_lower` may be empty when `needs_path()`
     /// is false (no predicate looks at the path).
     pub fn eval(&self, e: &EntryView) -> bool {
-        if self.clauses.is_empty() {
-            return true;
+        match &self.root {
+            None => true,
+            Some(expr) => self.eval_expr(expr, e),
         }
-        self.clauses.iter().any(|conj| {
-            conj.leaves.iter().all(|leaf| {
-                let hit = self.eval_pred(&leaf.pred, e);
-                hit ^ leaf.negate
-            })
-        })
+    }
+
+    fn eval_expr(&self, expr: &Expr, e: &EntryView) -> bool {
+        match expr {
+            Expr::Pred(pred) => self.eval_pred(pred, e),
+            Expr::Not(inner) => !self.eval_expr(inner, e),
+            Expr::And(parts) => parts.iter().all(|x| self.eval_expr(x, e)),
+            Expr::Or(parts) => parts.iter().any(|x| self.eval_expr(x, e)),
+        }
     }
 
     fn eval_pred(&self, pred: &Pred, e: &EntryView) -> bool {
@@ -341,10 +323,13 @@ pub fn extract_content(query: &str) -> (String, Vec<String>) {
     (rest.split_whitespace().collect::<Vec<_>>().join(" "), terms)
 }
 
-/// Split a query into words, quoted phrases, and the `|`/`!` operators. `|`
-/// and `"` cannot appear in NTFS file names, so they are always operators; `!`
-/// is the NOT operator only at the start of a term (so names like `!Locales`
-/// are still searchable as substrings, and `"!x"` matches one literally).
+/// Split a query into words, quoted phrases, and the `|`/`!`/`(`/`)` operators.
+/// `|` and `"` cannot appear in NTFS file names, so they are always operators;
+/// `!` is the NOT operator only at the start of a term (so names like
+/// `!Locales` are still searchable as substrings, and `"!x"` matches one
+/// literally). Parentheses *can* appear in file names (`Program Files (x86)`),
+/// so — matching Everything — unquoted `(`/`)` are always grouping operators;
+/// to match a literal parenthesis, quote it (`"(x86)"`).
 fn tokenize(query: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut buf = String::new();
@@ -369,6 +354,14 @@ fn tokenize(query: &str) -> Vec<Token> {
                 flush_word(&mut buf, &mut tokens);
                 tokens.push(Token::Or);
             }
+            '(' => {
+                flush_word(&mut buf, &mut tokens);
+                tokens.push(Token::LParen);
+            }
+            ')' => {
+                flush_word(&mut buf, &mut tokens);
+                tokens.push(Token::RParen);
+            }
             '!' if buf.is_empty() => tokens.push(Token::Not),
             c if c.is_whitespace() => flush_word(&mut buf, &mut tokens),
             _ => buf.push(c),
@@ -376,6 +369,137 @@ fn tokenize(query: &str) -> Vec<Token> {
     }
     flush_word(&mut buf, &mut tokens);
     tokens
+}
+
+/// Recursive-descent parser over [`Token`]s into an [`Expr`] tree. The grammar,
+/// lowest precedence first:
+///
+/// ```text
+/// or      := and ( '|' and )*
+/// and     := unary*                 // implicit AND of space-separated terms
+/// unary   := '!' unary | primary
+/// primary := '(' or ')' | word | phrase
+/// ```
+///
+/// It is deliberately lenient: unbalanced parentheses never error — a stray
+/// `)` is skipped and an unclosed `(` is implicitly closed at end of input —
+/// so a half-typed query still returns useful results instead of nothing.
+/// Maximum parenthesis nesting depth the parser will recurse into. Real queries
+/// never approach this; it only bounds stack growth on pathological input.
+const MAX_GROUP_DEPTH: u32 = 64;
+
+struct Parser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+    opts: &'a SearchOptions,
+    needs_path: bool,
+}
+
+impl Parser<'_> {
+    /// `or := and ( '|' and )*`
+    fn parse_or(&mut self, depth: u32) -> Result<Option<Expr>, String> {
+        let mut alts = Vec::new();
+        if let Some(node) = self.parse_and(depth)? {
+            alts.push(node);
+        }
+        while matches!(self.tokens.get(self.pos), Some(Token::Or)) {
+            self.pos += 1; // consume '|'
+            if let Some(node) = self.parse_and(depth)? {
+                alts.push(node);
+            }
+        }
+        Ok(combine(alts, true))
+    }
+
+    /// `and := unary*` — implicit AND of terms, ending at `|`, a closing `)`
+    /// (when inside a group), or end of input.
+    fn parse_and(&mut self, depth: u32) -> Result<Option<Expr>, String> {
+        let mut parts = Vec::new();
+        loop {
+            match self.tokens.get(self.pos) {
+                None | Some(Token::Or) => break,
+                Some(Token::RParen) if depth > 0 => break,
+                // A `)` with no open group is junk — skip it and continue.
+                Some(Token::RParen) => {
+                    self.pos += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(node) = self.parse_unary(depth)? {
+                parts.push(node);
+            }
+        }
+        Ok(combine(parts, false))
+    }
+
+    /// `unary := '!'* primary`
+    ///
+    /// A run of `!` is folded *iteratively* into a single parity bit rather than
+    /// recursing per `!` (`!!x` ≡ `x`, `!!!x` ≡ `!x`). This is both correct
+    /// boolean double-negation and essential for safety: a recursive `'!' unary`
+    /// rule would grow the stack one frame per `!`, and a long run of `!` (which
+    /// the cap on `(` does not touch) would overflow it — fatal under
+    /// `panic = "abort"`. Folding keeps `!` depth O(1), so the only source of
+    /// tree depth is parenthesis nesting, already bounded by `MAX_GROUP_DEPTH`.
+    fn parse_unary(&mut self, depth: u32) -> Result<Option<Expr>, String> {
+        let mut negate = false;
+        while matches!(self.tokens.get(self.pos), Some(Token::Not)) {
+            self.pos += 1; // consume '!'
+            negate = !negate;
+        }
+        let inner = self.parse_primary(depth)?;
+        Ok(inner.map(|e| if negate { Expr::Not(Box::new(e)) } else { e }))
+    }
+
+    /// `primary := '(' or ')' | word | phrase`
+    fn parse_primary(&mut self, depth: u32) -> Result<Option<Expr>, String> {
+        match self.tokens.get(self.pos) {
+            Some(Token::LParen) => {
+                self.pos += 1; // consume '('
+                               // Past the nesting cap, stop recursing: drop this `(` and let
+                               // the current level absorb its contents (its `)` becomes a stray
+                               // that's skipped). A run of `((((…` can't overflow the stack —
+                               // and with `panic = "abort"` a stack overflow would kill the app.
+                if depth >= MAX_GROUP_DEPTH {
+                    return Ok(None);
+                }
+                let inner = self.parse_or(depth + 1)?;
+                if matches!(self.tokens.get(self.pos), Some(Token::RParen)) {
+                    self.pos += 1; // consume matching ')'
+                }
+                Ok(inner)
+            }
+            Some(Token::Word(word)) => {
+                let word = word.clone();
+                self.pos += 1;
+                Ok(parse_word(&word, self.opts, &mut self.needs_path)?.map(Expr::Pred))
+            }
+            Some(Token::Phrase(phrase)) => {
+                let phrase = phrase.clone();
+                self.pos += 1;
+                Ok(phrase_pred(&phrase, self.opts, &mut self.needs_path).map(Expr::Pred))
+            }
+            // A structural token (`)`, `|`, or end) reached where a term was
+            // expected — e.g. a trailing `!`. Yield nothing without consuming so
+            // the enclosing rule can handle it.
+            _ => Ok(None),
+        }
+    }
+}
+
+/// Fold parsed parts into one node: drop when empty (no constraint), unwrap a
+/// lone child, otherwise wrap as `Or` (`is_or`) or `And`.
+fn combine(mut parts: Vec<Expr>, is_or: bool) -> Option<Expr> {
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(if is_or {
+            Expr::Or(parts)
+        } else {
+            Expr::And(parts)
+        }),
+    }
 }
 
 fn flush_word(buf: &mut String, tokens: &mut Vec<Token>) {
@@ -927,6 +1051,113 @@ mod tests {
         assert!(matcher("dm:2147483647").matches_all());
         assert!(matcher("dm:>=999999999").matches_all());
         assert!(matcher("dm:2147483647..2147483647").matches_all());
+    }
+
+    #[test]
+    fn grouping_distributes_or_under_and() {
+        // a AND (b OR c) — without the group this would parse as (a AND b) OR c.
+        let m = matcher("a (b | c)");
+        assert!(hits(&m, "a-b.txt", false, None));
+        assert!(hits(&m, "a-c.txt", false, None));
+        assert!(!hits(&m, "b-c.txt", false, None)); // missing `a`
+        assert!(!hits(&m, "a-only.txt", false, None)); // neither b nor c
+    }
+
+    #[test]
+    fn ungrouped_precedence_is_and_over_or() {
+        // Sanity check the contrast: `a b | c` is (a AND b) OR c.
+        let m = matcher("a b | c");
+        assert!(hits(&m, "a-b.txt", false, None)); // a AND b
+        assert!(hits(&m, "c-only.txt", false, None)); // c alone
+        assert!(!hits(&m, "a-only.txt", false, None)); // a without b, and no c
+    }
+
+    #[test]
+    fn nested_groups() {
+        // (report | memo) (2023 | 2024) !draft
+        let m = matcher("(report | memo) (2023 | 2024) !draft");
+        assert!(hits(&m, "report-2023-final.txt", false, None));
+        assert!(hits(&m, "memo-2024.txt", false, None));
+        assert!(!hits(&m, "report-2022.txt", false, None)); // wrong year
+        assert!(!hits(&m, "report-2023-draft.txt", false, None)); // excluded
+        assert!(!hits(&m, "letter-2024.txt", false, None)); // neither report nor memo
+    }
+
+    #[test]
+    fn negated_group_excludes_whole_subexpression() {
+        // log !(old | backup) — logs that are neither old nor backup.
+        let m = matcher("log !(old | backup)");
+        assert!(hits(&m, "system.log", false, None));
+        assert!(!hits(&m, "old.log", false, None));
+        assert!(!hits(&m, "backup.log", false, None));
+        assert!(!hits(&m, "notes.txt", false, None)); // not a log at all
+    }
+
+    #[test]
+    fn functions_inside_groups() {
+        // (ext:dll | ext:exe) size:>1mb — large binaries only.
+        let m = matcher("(ext:dll | ext:exe) size:>1mb");
+        assert!(hits(&m, "big.dll", false, Some(2 * 1024 * 1024)));
+        assert!(hits(&m, "app.exe", false, Some(4 * 1024 * 1024)));
+        assert!(!hits(&m, "small.dll", false, Some(1024))); // too small
+        assert!(!hits(&m, "big.txt", false, Some(2 * 1024 * 1024))); // wrong ext
+    }
+
+    #[test]
+    fn unbalanced_parens_are_lenient() {
+        // Stray/unclosed parentheses must degrade gracefully, never error or
+        // swallow the whole query.
+        assert!(hits(&matcher("(foo"), "foo.txt", false, None)); // unclosed open
+        assert!(hits(&matcher("foo)"), "foo.txt", false, None)); // stray close
+        assert!(hits(&matcher(")foo"), "foo.txt", false, None)); // leading stray
+        assert!(hits(&matcher("foo (bar"), "foo-bar.txt", false, None));
+        // An empty group is no constraint.
+        assert!(hits(&matcher("foo ()"), "foo.txt", false, None));
+        assert!(matcher("()").matches_all());
+    }
+
+    #[test]
+    fn deeply_nested_parens_do_not_overflow() {
+        // A pathological run of '(' must be bounded, not recurse without limit
+        // (with panic = "abort" a stack overflow would abort the process). The
+        // inner term still matches; the surplus parens are flattened away.
+        let depth = (MAX_GROUP_DEPTH as usize) * 4;
+        let q = format!("{}foo{}", "(".repeat(depth), ")".repeat(depth));
+        let m = matcher(&q);
+        assert!(hits(&m, "foo.txt", false, None));
+        assert!(!hits(&m, "bar.txt", false, None));
+    }
+
+    #[test]
+    fn long_not_run_does_not_overflow() {
+        // A run of `!` must fold to O(1) parser depth, not recurse per `!`
+        // (uncapped `!` recursion would overflow the stack — fatal under
+        // panic = "abort"). Far past any stack the recursive form survived.
+        let bangs = "!".repeat(500_000);
+        // Even count cancels: `!!…!!foo` == `foo`.
+        let even = matcher(&format!("{bangs}foo"));
+        assert!(hits(&even, "foo.txt", false, None));
+        assert!(!hits(&even, "bar.txt", false, None));
+        // Odd count negates: `!!…!foo` == `!foo`.
+        let odd = matcher(&format!("{}foo", "!".repeat(500_001)));
+        assert!(!hits(&odd, "foo.txt", false, None));
+        assert!(hits(&odd, "bar.txt", false, None));
+    }
+
+    #[test]
+    fn double_negation_cancels() {
+        let m = matcher("report !!draft");
+        // `!!draft` == `draft`, so both terms are required (implicit AND).
+        assert!(hits(&m, "report-draft.txt", false, None));
+        assert!(!hits(&m, "report-final.txt", false, None));
+    }
+
+    #[test]
+    fn quoted_parens_are_literal() {
+        // A quoted parenthesis is matched literally, not treated as grouping.
+        let m = matcher("\"(x86)\"");
+        assert!(hits(&m, "Program Files (x86)", true, None));
+        assert!(!hits(&m, "Program Files", true, None));
     }
 
     #[test]

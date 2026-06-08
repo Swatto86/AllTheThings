@@ -34,7 +34,8 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | `ext:`, `file:`, `folder:` | ✅ | ✅ | |
 | `path:` (match against full path) | ✅ | ✅ | |
 | `size:` with ranges + units | ✅ | ✅ | e.g. `size:>=1mb size:<16mb`. |
-| OR `\|`, NOT `!`, quotes `" "` | ✅ | ✅ | Grouping `( )` not yet. |
+| OR `\|`, NOT `!`, quotes `" "` | ✅ | ✅ | |
+| Grouping `( )` | ✅ | ✅ | Nestable; `a (b \| c)` = `a AND (b OR c)`. Quote a literal paren (`"(x86)"`). Unbalanced parens are tolerated. |
 | Date filters `dm:` `dc:` `da:` | ✅ | ✅ | Keywords (`today`, `thisweek`…), `YYYY[-MM[-DD]]`, ranges `A..B`, `>`/`>=`/`<`/`<=`. |
 | Attribute filter `attrib:` | ✅ | ✅ | e.g. `attrib:h`, `attrib:rhs` — all listed attributes must be set. |
 | Functions: `parent:` `child:` `count:` `dupe:` `len:` … | ✅ | ❌ | |
@@ -111,12 +112,11 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 
 1. **Full shell context menu** (`IContextMenu`) and **drag & drop out** — discrete verbs (Delete, Rename, Properties, Open with, Run as admin) are done.
 2. **Bookmarks & saved filters** (search history is done).
-3. **Query grouping** `( )` and exact-phrase refinements.
-4. **Open `.efu` file lists** as a search source (writing them is done).
-5. **Light theme** and localization.
-6. **Bigger lifts:** **folder/ReFS indexing**, a **CLI**, an **HTTP** query interface, and a public IPC/SDK.
+3. **Open `.efu` file lists** as a search source (writing them is done).
+4. **Localization.**
+5. **Bigger lifts:** **folder/ReFS indexing**, a **CLI**, an **HTTP** query interface, and a public IPC/SDK.
 
-_Recently shipped: a configurable **global hotkey** (summon/hide from anywhere) and an Explorer **"Search here"** folder context-menu entry; **the GUI runs without admin** — a LocalSystem background **service** indexes and the `asInvoker` GUI queries it over a query-only pipe (installer registers + starts the service; Settings manages it via an elevated relaunch), export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
+_Recently shipped: **query grouping** `( )` (nestable; `a (b \| c)` = `a AND (b OR c)`); **light/dark/system theming**; a configurable **global hotkey** (summon/hide from anywhere) and an Explorer **"Search here"** folder context-menu entry; **the GUI runs without admin** — a LocalSystem background **service** indexes and the `asInvoker` GUI queries it over a query-only pipe (installer registers + starts the service; Settings manages it via an elevated relaunch), export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at

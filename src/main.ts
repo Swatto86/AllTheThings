@@ -382,25 +382,99 @@ function stripContent(query: string): string {
     .trim();
 }
 
+type QToken =
+  | { kind: "word" | "phrase"; text: string }
+  | { kind: "or" | "not" | "lparen" | "rparen" };
+
+// Tokenize a query the same way the Rust matcher does (application/search.rs):
+// `"…"` is a phrase, `|`/`(`/`)` are always operators, and `!` is NOT only at
+// the start of a term (a mid-word `!` is literal). Kept in lockstep with the
+// backend so highlighting reflects what actually matched.
+function tokenizeQuery(query: string): QToken[] {
+  const tokens: QToken[] = [];
+  let buf = "";
+  const flush = (): void => {
+    if (buf) {
+      tokens.push({ kind: "word", text: buf });
+      buf = "";
+    }
+  };
+  for (let i = 0; i < query.length; i++) {
+    const c = query[i];
+    if (c === '"') {
+      flush();
+      let phrase = "";
+      i++;
+      while (i < query.length && query[i] !== '"') phrase += query[i++];
+      if (phrase) tokens.push({ kind: "phrase", text: phrase });
+    } else if (c === "|") {
+      flush();
+      tokens.push({ kind: "or" });
+    } else if (c === "(") {
+      flush();
+      tokens.push({ kind: "lparen" });
+    } else if (c === ")") {
+      flush();
+      tokens.push({ kind: "rparen" });
+    } else if (c === "!" && buf === "") {
+      tokens.push({ kind: "not" });
+    } else if (/\s/.test(c)) {
+      flush();
+    } else {
+      buf += c;
+    }
+  }
+  flush();
+  return tokens;
+}
+
 // Plain terms to highlight: quoted phrases and bare words, minus operators,
-// negated terms, ext:/size:/file:/folder: functions, and wildcards.
+// ext:/size:/… functions, and wildcards. Cosmetic only — the authoritative
+// matcher is the Rust query parser. It tracks negation parity and group scope
+// so a term inside a negated group (`!(a | b)`, `report !old`) is NOT marked
+// (`!!x` cancels back to positive, mirroring the backend).
 function computeHighlightTerms(query: string, regex: boolean): string[] {
   if (regex) return [];
   const terms: string[] = [];
-  const re = /"([^"]*)"|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(query)) !== null) {
-    if (m[1] !== undefined) {
-      if (m[1]) terms.push(m[1].toLowerCase());
-      continue;
+  let negated = false; // cumulative NOT parity at the current point
+  let pending = false; // a NOT awaiting the next term or group
+  const stack: boolean[] = []; // saved parity per open `(`
+  for (const t of tokenizeQuery(query)) {
+    switch (t.kind) {
+      case "not":
+        pending = !pending;
+        break;
+      case "or":
+        pending = false; // a dangling `!` before `|` negates nothing
+        break;
+      case "lparen":
+        stack.push(negated);
+        negated = negated !== pending; // the group inherits the pending NOT
+        pending = false;
+        break;
+      case "rparen":
+        if (stack.length) negated = stack.pop() as boolean;
+        pending = false;
+        break;
+      case "phrase": {
+        const neg = negated !== pending;
+        pending = false;
+        if (!neg && t.text) terms.push(t.text.toLowerCase());
+        break;
+      }
+      case "word": {
+        const neg = negated !== pending;
+        pending = false;
+        if (neg) break;
+        let tok = t.text;
+        const lower = tok.toLowerCase();
+        if (/^(ext|size|file|files|folder|folders|dir|dm|dc|da|attrib):/.test(lower)) break;
+        if (lower.startsWith("path:")) tok = tok.slice(5);
+        if (!tok || tok.includes("*") || tok.includes("?")) break;
+        terms.push(tok.toLowerCase());
+        break;
+      }
     }
-    let tok = m[2];
-    if (tok === "|" || tok.startsWith("!")) continue;
-    const lower = tok.toLowerCase();
-    if (/^(ext|size|file|files|folder|folders|dir|dm|dc|da|attrib):/.test(lower)) continue;
-    if (lower.startsWith("path:")) tok = tok.slice(5);
-    if (!tok || tok.includes("*") || tok.includes("?")) continue;
-    terms.push(tok.toLowerCase());
   }
   return terms;
 }
