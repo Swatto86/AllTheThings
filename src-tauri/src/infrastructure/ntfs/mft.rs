@@ -119,12 +119,20 @@ impl MftReader {
         let cluster = self.bytes_per_cluster as u64;
         let mut acc: u64 = 0;
         for run in &self.runs {
-            let recs_in_run = (run.clusters * cluster) / rec;
+            // Run lengths come straight off disk; a corrupt run could overflow
+            // the offset arithmetic. Skip such a run rather than wrapping to a
+            // bogus on-disk position.
+            let Some(run_bytes) = run.clusters.checked_mul(cluster) else {
+                continue;
+            };
+            let recs_in_run = run_bytes / rec;
             if record_no < acc + recs_in_run {
                 let lcn = run.start_lcn?;
-                return Some(lcn * cluster + (record_no - acc) * rec);
+                return lcn
+                    .checked_mul(cluster)
+                    .and_then(|base| base.checked_add((record_no - acc).checked_mul(rec)?));
             }
-            acc += recs_in_run;
+            acc = acc.saturating_add(recs_in_run);
         }
         None
     }
@@ -178,7 +186,11 @@ impl VolumeEnumerator for MftReader {
             if record_no >= self.record_count {
                 break;
             }
-            let run_bytes = run.clusters * cluster;
+            // Disk-controlled run length; skip a run whose size overflows rather
+            // than wrapping to a bogus read position.
+            let Some(run_bytes) = run.clusters.checked_mul(cluster) else {
+                continue;
+            };
 
             let Some(lcn) = run.start_lcn else {
                 // Sparse run: no data on disk, just advance the numbering.
@@ -186,7 +198,9 @@ impl VolumeEnumerator for MftReader {
                 continue;
             };
 
-            let base = lcn * cluster;
+            let Some(base) = lcn.checked_mul(cluster) else {
+                continue;
+            };
             let mut pos = 0u64;
             while pos < run_bytes {
                 let mut want = (run_bytes - pos).min(chunk_bytes as u64) as usize;
@@ -256,7 +270,9 @@ fn parse_mft_data_runs(rec0: &[u8], volume: &str) -> IndexResult<(Vec<Run>, u64)
             break;
         }
         let len = read_u32(rec0, off + 4) as usize;
-        if len < 8 || off + len > rec0.len() {
+        // See parse_file_record: require a full 16-byte header so the byte reads
+        // below cannot index past a record-boundary-straddling attribute.
+        if len < 16 || off + len > rec0.len() {
             break;
         }
         let non_resident = rec0[off + 8];
@@ -365,7 +381,11 @@ fn parse_file_record(
             break;
         }
         let len = read_u32(rec, off + 4) as usize;
-        if len < 8 || off + len > rec.len() {
+        // Require the full 16-byte resident attribute header before indexing
+        // off+8/off+9 below. `len < 16` (not `< 8`) also rejects a header that
+        // straddles the record end: a crafted len==8 at off==rec.len()-8 would
+        // otherwise pass `off + len > rec.len()` and index one byte past the end.
+        if len < 16 || off + len > rec.len() {
             break;
         }
         let non_resident = rec[off + 8];
@@ -494,7 +514,11 @@ fn parse_record_meta(rec: &[u8]) -> Option<RecordMeta> {
             break;
         }
         let len = read_u32(rec, off + 4) as usize;
-        if len < 8 || off + len > rec.len() {
+        // Require the full 16-byte resident attribute header before indexing
+        // off+8/off+9 below. `len < 16` (not `< 8`) also rejects a header that
+        // straddles the record end: a crafted len==8 at off==rec.len()-8 would
+        // otherwise pass `off + len > rec.len()` and index one byte past the end.
+        if len < 16 || off + len > rec.len() {
             break;
         }
         let non_resident = rec[off + 8];
