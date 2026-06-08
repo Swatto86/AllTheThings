@@ -16,7 +16,8 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **Search-as-you-type** with live USN updates.
 - **Hardlink-aware**: a file appears at every path it is linked from (e.g. `System32\ntoskrnl.exe` and its WinSxS hardlinks).
 - **Persistent index cache**: the index is saved to `%LOCALAPPDATA%\AllTheThings\cache`; subsequent launches load it instantly and replay only USN changes since (full rescan only if the journal was recreated or its tail purged).
-- **No white flash on launch**: the window is shown only after the dark UI has painted.
+- **Light & dark themes** (Settings): choose **Dark**, **Light**, or **System** (follows Windows). Applied before first paint, so no flash.
+- **No white flash on launch**: the window is shown only after the UI has painted.
 - **Query syntax**: AND (space), **OR** (`|`), **NOT** (`!`), `"quoted phrases"`, `*`/`?` wildcards, regex, and `ext:`/`path:`/`file:`/`folder:`/`size:`/`dm:`/`dc:`/`da:`/`attrib:` functions (e.g. `ext:dll | ext:exe`, `report !draft size:>1mb`, `dm:thisweek`, `dc:2024-01-01..2024-06-30`, `attrib:h`). The date functions filter by **m**odified / **c**reated / **a**ccessed time and accept keywords (`today`, `yesterday`, `thisweek`/`thismonth`/`thisyear`, …), `YYYY[-MM[-DD]]` dates, `>`/`>=`/`<`/`<=` comparisons, and `A..B` ranges.
 - **Matched-text highlighting** in results, and a **recent-searches** history dropdown.
 - **Export results** — toolbar **Export** writes the current (full, filtered) result set to **CSV**, plain **text**, or an Everything **`.efu`** file list; the format follows the extension you choose in the Save dialog.

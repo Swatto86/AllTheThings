@@ -89,7 +89,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Auto-update | ✅ (1.5) | ✅ | Checks GitHub Releases, verifies signature, one-click install. |
 | Portable mode | ✅ | ❌ | |
 | Multi-language / localization | ✅ | ❌ | |
-| Light/other themes | ✅ | ⚠️ | Dark only. |
+| Light/other themes | ✅ | ✅ | Light + dark, or follow Windows (Settings). |
 
 ## Power features
 
