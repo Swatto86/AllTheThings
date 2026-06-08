@@ -1330,8 +1330,10 @@ function showHistory(): void {
     hideHistory();
     return;
   }
-  historyMenu.innerHTML = history.map((h, i) => `<button data-hi="${i}">${esc(h)}</button>`).join("");
-  historyMenu.querySelectorAll<HTMLButtonElement>("button").forEach((b, i) => {
+  const items = history.map((h, i) => `<button data-hi="${i}">${esc(h)}</button>`).join("");
+  historyMenu.innerHTML = `${items}<div class="sep"></div><button id="history-clear" class="history-clear">Clear history</button>`;
+  historyMenu.querySelectorAll<HTMLButtonElement>("button[data-hi]").forEach((b) => {
+    const i = Number(b.dataset.hi);
     b.addEventListener("mousedown", (e) => e.preventDefault()); // keep input focus
     b.addEventListener("click", () => {
       q.value = history[i];
@@ -1341,6 +1343,9 @@ function showHistory(): void {
       q.focus();
     });
   });
+  const clear = historyMenu.querySelector<HTMLButtonElement>("#history-clear")!;
+  clear.addEventListener("mousedown", (e) => e.preventDefault()); // keep input focus
+  clear.addEventListener("click", clearHistory);
   const r = q.getBoundingClientRect();
   historyMenu.style.left = `${r.left}px`;
   historyMenu.style.top = `${r.bottom + 2}px`;
@@ -1350,6 +1355,16 @@ function showHistory(): void {
 
 function hideHistory(): void {
   historyMenu.classList.add("hidden");
+}
+
+function clearHistory(): void {
+  history = [];
+  try {
+    localStorage.removeItem(HISTORY_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  hideHistory();
 }
 
 // The search match-modes, shown as a ticked checklist in the Options dropdown.

@@ -128,6 +128,15 @@ body,
   margin: 4px 6px;
   background: oklch(var(--bc) / 0.1);
 }
+.menu-pop .history-clear {
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.menu-pop .history-clear:hover {
+  opacity: 1;
+  background: oklch(var(--er) / 0.18);
+}
 
 /* Inline rename editor, floated over the selected row's name cell */
 .rename-input {
