@@ -1,7 +1,7 @@
 {
   "name": "allthethings",
   "private": true,
-  "version": "0.13.0",
+  "version": "0.14.0",
   "type": "module",
   "description": "AllTheThings — a voidtools Everything clone (Rust + Tauri)",
   "author": "Swatto <claude.ai@swatto.co.uk>",
