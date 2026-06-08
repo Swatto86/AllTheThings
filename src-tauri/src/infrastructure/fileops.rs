@@ -9,10 +9,12 @@
 
 use std::iter::once;
 use std::mem::{size_of, zeroed};
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_CANCELLED};
+use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
 use windows_sys::Win32::UI::Shell::{
     SHFileOperationW, ShellExecuteExW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FO_DELETE,
     SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SHFILEOPSTRUCTW,
@@ -41,10 +43,28 @@ pub fn rename(path: &str, new_name: &str) -> Result<String, String> {
     }
     // On case-insensitive volumes `dest.exists()` is true for a case-only rename
     // (a.txt -> A.txt), which is a valid self-rename, not a collision.
-    if dest.exists() && !same_file(src, &dest) {
+    let case_only = dest.exists() && same_file(src, &dest);
+    if dest.exists() && !case_only {
         return Err(format!("\"{new_name}\" already exists"));
     }
-    std::fs::rename(src, &dest).map_err(|e| e.to_string())?;
+    // Move atomically via MoveFileExW. Pass MOVEFILE_REPLACE_EXISTING only for a
+    // case-only self-rename; otherwise no replace flag, so the OS itself fails if
+    // `dest` appeared in the gap after the check above. This closes the TOCTOU
+    // window that a check-then-`std::fs::rename` (which replaces) leaves open —
+    // honouring the "refuses to overwrite" contract even under concurrency.
+    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(once(0)).collect();
+    let dest_w: Vec<u16> = dest.as_os_str().encode_wide().chain(once(0)).collect();
+    let flags = if case_only {
+        MOVEFILE_REPLACE_EXISTING
+    } else {
+        0
+    };
+    // SAFETY: both wide strings are null-terminated and outlive the call.
+    let ok = unsafe { MoveFileExW(src_w.as_ptr(), dest_w.as_ptr(), flags) };
+    if ok == 0 {
+        let code = unsafe { GetLastError() };
+        return Err(format!("rename failed (code {code})"));
+    }
     Ok(dest.to_string_lossy().into_owned())
 }
 
