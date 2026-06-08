@@ -254,3 +254,52 @@ mark.hl {
   justify-content: flex-end;
   margin-top: 12px;
 }
+
+/* Search builder modal — reuses .overlay / .settings-panel / .settings-row */
+.builder-panel {
+  width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.builder-input {
+  width: 230px;
+}
+.builder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  justify-content: flex-end;
+  max-width: 260px;
+}
+.builder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.builder-preview-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.builder-preview {
+  display: block;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: oklch(var(--bc) / 0.06);
+  border: 1px solid oklch(var(--bc) / 0.14);
+  word-break: break-word;
+  white-space: pre-wrap;
+  min-height: 16px;
+}
+.builder-actions {
+  justify-content: space-between;
+}
+.builder-action-group {
+  display: flex;
+  gap: 8px;
+}

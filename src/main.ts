@@ -189,6 +189,7 @@ app.innerHTML = /* html */ `
         <button id="optbtn" title="Match options" class="btn btn-xs">Options ▾</button>
         <div id="opt-menu" class="menu-pop hidden"></div>
       </div>
+      <button id="builder" title="Search builder — compose a query from fields" class="btn btn-xs">Builder</button>
       <button id="folders-first" title="Folders first" class="btn btn-xs">📁</button>
       <button id="export" title="Export results (CSV / TXT / EFU)" class="btn btn-xs">Export</button>
       <button id="gear" title="Settings" class="btn btn-xs">⚙</button>
@@ -248,6 +249,76 @@ app.innerHTML = /* html */ `
       </div>
       <div id="settings-msg" class="settings-msg"></div>
       <div class="settings-actions"><button id="settings-close" class="btn btn-sm">Close</button></div>
+    </div>
+  </div>
+  <div id="builder-overlay" class="overlay hidden">
+    <div class="settings-panel builder-panel">
+      <div class="settings-title">Search builder</div>
+      <label class="settings-row">
+        <span>Name contains<br><span class="hint">Words in the file or folder name (space = AND, <code>|</code> = OR)</span></span>
+        <input type="text" id="b-name" class="input input-bordered input-sm builder-input" autocomplete="off" spellcheck="false" placeholder="e.g. report" />
+      </label>
+      <label class="settings-row">
+        <span>Contents contain<br><span class="hint">Search inside text files — slower; binaries skipped</span></span>
+        <input type="text" id="b-content" class="input input-bordered input-sm builder-input" autocomplete="off" spellcheck="false" placeholder="e.g. timeout" />
+      </label>
+      <label class="settings-row">
+        <span>Extensions<br><span class="hint">Space or comma separated, e.g. <code>dll exe png</code></span></span>
+        <input type="text" id="b-ext" class="input input-bordered input-sm builder-input" autocomplete="off" spellcheck="false" placeholder="e.g. pdf docx" />
+      </label>
+      <label class="settings-row">
+        <span>Size</span>
+        <select id="b-size" class="select select-bordered select-sm"></select>
+      </label>
+      <div class="settings-row">
+        <span>Date</span>
+        <div class="svc-controls">
+          <select id="b-date-field" class="select select-bordered select-sm">
+            <option value="dm">Modified</option>
+            <option value="dc">Created</option>
+            <option value="da">Accessed</option>
+          </select>
+          <select id="b-date-range" class="select select-bordered select-sm">
+            <option value="">Any time</option>
+            <option value="today">Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="thisweek">This week</option>
+            <option value="lastweek">Last week</option>
+            <option value="thismonth">This month</option>
+            <option value="lastmonth">Last month</option>
+            <option value="thisyear">This year</option>
+            <option value="lastyear">Last year</option>
+          </select>
+        </div>
+      </div>
+      <label class="settings-row">
+        <span>Show</span>
+        <select id="b-type" class="select select-bordered select-sm">
+          <option value="">Files &amp; folders</option>
+          <option value="file:">Files only</option>
+          <option value="folder:">Folders only</option>
+        </select>
+      </label>
+      <div class="settings-row">
+        <span>Attributes<br><span class="hint">Match only items with every ticked attribute</span></span>
+        <div class="builder-chips" id="b-attrs"></div>
+      </div>
+      <div class="settings-row">
+        <span>Match<br><span class="hint">How name &amp; path terms are compared — not file contents</span></span>
+        <div class="builder-chips" id="b-match"></div>
+      </div>
+      <div class="settings-row builder-preview-row">
+        <span>Query preview</span>
+        <code id="b-preview" class="builder-preview"></code>
+      </div>
+      <div id="builder-msg" class="settings-msg"></div>
+      <div class="settings-actions builder-actions">
+        <button id="b-reset" class="btn btn-sm btn-ghost">Reset</button>
+        <div class="builder-action-group">
+          <button id="b-cancel" class="btn btn-sm">Close</button>
+          <button id="b-search" class="btn btn-sm btn-primary">Search</button>
+        </div>
+      </div>
     </div>
   </div>
   <div id="confirm-overlay" class="overlay hidden">
@@ -989,6 +1060,213 @@ function applySizePreset(expr: string): void {
   q.focus();
 }
 
+// ---- Search builder ----
+// A friendly form that composes a query string from fields (name, contents,
+// extensions, size, date, type, attributes) so the syntax is discoverable —
+// in particular it surfaces content search, which has no toolbar button.
+const builderOverlay = document.querySelector<HTMLDivElement>("#builder-overlay")!;
+const builderBtn = document.querySelector<HTMLButtonElement>("#builder")!;
+const bName = document.querySelector<HTMLInputElement>("#b-name")!;
+const bContent = document.querySelector<HTMLInputElement>("#b-content")!;
+const bExt = document.querySelector<HTMLInputElement>("#b-ext")!;
+const bSize = document.querySelector<HTMLSelectElement>("#b-size")!;
+const bDateField = document.querySelector<HTMLSelectElement>("#b-date-field")!;
+const bDateRange = document.querySelector<HTMLSelectElement>("#b-date-range")!;
+const bType = document.querySelector<HTMLSelectElement>("#b-type")!;
+const bAttrs = document.querySelector<HTMLDivElement>("#b-attrs")!;
+const bMatch = document.querySelector<HTMLDivElement>("#b-match")!;
+const bPreview = document.querySelector<HTMLElement>("#b-preview")!;
+const bSearch = document.querySelector<HTMLButtonElement>("#b-search")!;
+const bCancel = document.querySelector<HTMLButtonElement>("#b-cancel")!;
+const bReset = document.querySelector<HTMLButtonElement>("#b-reset")!;
+
+// [letter, label] for the `attrib:` builder. `attrib:` requires ALL listed bits.
+const BUILDER_ATTRS: [string, string][] = [
+  ["h", "Hidden"],
+  ["s", "System"],
+  ["r", "Read-only"],
+  ["a", "Archive"],
+  ["c", "Compressed"],
+  ["e", "Encrypted"],
+];
+// Match toggles the builder can set — the subset of MATCH_OPTIONS that composes
+// with functions. Regex is omitted: it treats the whole query as one pattern,
+// which would break the composed `ext:`/`size:`/… functions.
+const BUILDER_MATCH: [MatchKey, string][] = [
+  ["matchCase", "Case"],
+  ["wholeWord", "Whole word"],
+  ["matchPath", "Full path"],
+];
+
+function buildBuilderControls(): void {
+  bSize.innerHTML = SIZE_PRESETS.map(
+    ([label, expr]) => `<option value="${esc(expr)}">${esc(label)}</option>`,
+  ).join("");
+  bAttrs.innerHTML = BUILDER_ATTRS.map(
+    ([letter, label]) =>
+      `<label class="builder-chip"><input type="checkbox" data-attr="${letter}" />${esc(label)}</label>`,
+  ).join("");
+  bMatch.innerHTML = BUILDER_MATCH.map(
+    ([key, label]) =>
+      `<label class="builder-chip"><input type="checkbox" data-match="${key}" />${esc(label)}</label>`,
+  ).join("");
+  builderOverlay
+    .querySelectorAll<HTMLInputElement>('input[data-attr], input[data-match]')
+    .forEach((el) => el.addEventListener("change", updateBuilderPreview));
+}
+
+// Build a `content:` token, quoting the phrase when it has spaces. Embedded
+// quotes are stripped so they can't break the wrapper.
+function contentToken(raw: string): string {
+  const t = raw.replace(/"/g, "").trim();
+  if (!t) return "";
+  return /\s/.test(t) ? `content:"${t}"` : `content:${t}`;
+}
+
+// Function prefixes that would turn a bare Name word into a metadata filter
+// instead of a literal name match.
+const FN_PREFIX = /^(ext|size|content|dm|dc|da|attrib|path|file|files|folder|folders|dir):/i;
+
+// Turn one Name word into a query term. Words containing grouping/negation
+// characters or a function prefix are quoted so they match literally (the
+// builder has dedicated fields for those); ordinary words — and wildcards —
+// stay bare so the match options still apply to them.
+function nameWord(word: string): string {
+  const clean = word.replace(/"/g, "");
+  if (!clean) return "";
+  if (/[()]/.test(clean) || clean.startsWith("!") || FN_PREFIX.test(clean)) {
+    return `"${clean}"`;
+  }
+  return clean;
+}
+
+// Compose the Name field into a query fragment: words are AND-ed, `|` is OR.
+// Multiple OR alternatives are parenthesised so the other builder filters bind
+// to the whole name expression, not just the last alternative.
+function nameToQuery(raw: string): string {
+  const segments = raw
+    .split("|")
+    .map((seg) => seg.trim().split(/\s+/).map(nameWord).filter(Boolean).join(" "))
+    .filter(Boolean);
+  if (segments.length === 0) return "";
+  if (segments.length === 1) return segments[0];
+  return `(${segments.join(" | ")})`;
+}
+
+// Normalise one Extensions entry to a bare extension: take the segment after the
+// last dot (so `*.dll` / `tar.gz` → `dll` / `gz`) and drop anything that isn't a
+// valid extension character. The backend's `ext:` only compares the final
+// segment, so a compound or glob would otherwise never match.
+function normalizeExt(token: string): string {
+  const segments = token.split(".").filter(Boolean);
+  const last = (segments.pop() ?? "").toLowerCase();
+  // Strip only characters illegal in Windows filenames (which also covers the
+  // query operators " : ? * | …); legitimate ext chars like `+` (c++) and
+  // non-ASCII letters survive, so a real extension is never silently rewritten.
+  return last.replace(/[<>:"/\\|?*]/g, "");
+}
+
+function composeBuilderQuery(): string {
+  const parts: string[] = [];
+
+  const name = nameToQuery(bName.value);
+  if (name) parts.push(name);
+
+  const exts = [...new Set(bExt.value.split(/[\s,;|()]+/).map(normalizeExt).filter(Boolean))];
+  if (exts.length) parts.push(`ext:${exts.join(";")}`);
+
+  // A size filter only narrows files; combining it with "Folders only" can never
+  // match, so drop it there (the control is greyed out to match).
+  if (bSize.value && bType.value !== "folder:") parts.push(bSize.value);
+  if (bDateRange.value) parts.push(`${bDateField.value}:${bDateRange.value}`);
+  if (bType.value) parts.push(bType.value);
+
+  const letters = Array.from(bAttrs.querySelectorAll<HTMLInputElement>("input"))
+    .filter((el) => el.checked)
+    .map((el) => el.dataset.attr)
+    .join("");
+  if (letters) parts.push(`attrib:${letters}`);
+
+  const content = contentToken(bContent.value);
+  if (content) parts.push(content);
+
+  return parts.join(" ");
+}
+
+// Size can't apply to folders, so grey out the control under "Folders only".
+function syncBuilderSize(): void {
+  bSize.disabled = bType.value === "folder:";
+}
+
+function updateBuilderPreview(): void {
+  bPreview.textContent = composeBuilderQuery() || "(empty — matches everything)";
+}
+
+function builderMatchInput(key: MatchKey): HTMLInputElement | null {
+  return bMatch.querySelector<HTMLInputElement>(`input[data-match="${key}"]`);
+}
+
+// Clear every query-composing field (match chips are synced separately).
+function clearBuilderFields(): void {
+  bName.value = "";
+  bContent.value = "";
+  bExt.value = "";
+  bSize.value = "";
+  bDateField.value = "dm";
+  bDateRange.value = "";
+  bType.value = "";
+  bAttrs.querySelectorAll<HTMLInputElement>("input").forEach((el) => (el.checked = false));
+}
+
+// Reflect the live match options onto the chips so they round-trip.
+function syncBuilderMatch(): void {
+  for (const [key] of BUILDER_MATCH) {
+    const el = builderMatchInput(key);
+    if (el) el.checked = options[key];
+  }
+}
+
+function openBuilder(): void {
+  // A fresh form every open — fields cleared, chips synced to the live options —
+  // so the modal is never a confusing mix of stale and current state.
+  closeSettings();
+  clearBuilderFields();
+  syncBuilderMatch();
+  syncBuilderSize();
+  updateBuilderPreview();
+  builderOverlay.classList.remove("hidden");
+  bName.focus();
+}
+
+function closeBuilder(): void {
+  builderOverlay.classList.add("hidden");
+}
+
+function applyBuilder(): void {
+  const query = composeBuilderQuery();
+  for (const [key] of BUILDER_MATCH) {
+    const el = builderMatchInput(key);
+    if (el) options[key] = el.checked;
+  }
+  // The builder emits standard syntax (ext:/size:/…), which regex mode would
+  // treat as one literal pattern — so clear it.
+  options.regex = false;
+  q.value = query;
+  options.query = query;
+  syncControls();
+  closeBuilder();
+  runSearch();
+  q.focus();
+}
+
+function resetBuilder(): void {
+  clearBuilderFields();
+  syncBuilderMatch();
+  syncBuilderSize();
+  updateBuilderPreview();
+  bName.focus();
+}
+
 // ---- Search history ----
 const HISTORY_KEY = "att.history";
 const HISTORY_MAX = 25;
@@ -1221,6 +1499,7 @@ function searchHere(path: string): void {
 }
 
 function openSettings(): void {
+  closeBuilder(); // the two modals are mutually exclusive
   setTheme.value = themePref();
   loadSettings();
   fetchServiceState();
@@ -1566,6 +1845,35 @@ foldersFirstBtn.addEventListener("click", () => {
 exportBtn.addEventListener("click", exportResults);
 gear.addEventListener("click", openSettings);
 settingsClose.addEventListener("click", closeSettings);
+
+// ---- Search builder wiring ----
+builderBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  hideMenu();
+  sizeMenu.classList.add("hidden");
+  optMenu.classList.add("hidden");
+  hideHistory();
+  openBuilder();
+});
+bSearch.addEventListener("click", applyBuilder);
+bCancel.addEventListener("click", closeBuilder);
+bReset.addEventListener("click", resetBuilder);
+builderOverlay.addEventListener("click", (e) => {
+  if (e.target === builderOverlay) closeBuilder();
+});
+[bName, bContent, bExt].forEach((el) => {
+  el.addEventListener("input", updateBuilderPreview);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      applyBuilder();
+    }
+  });
+});
+bType.addEventListener("change", syncBuilderSize);
+[bSize, bDateField, bDateRange, bType].forEach((el) =>
+  el.addEventListener("change", updateBuilderPreview),
+);
 updateInstall.addEventListener("click", installUpdate);
 updateLater.addEventListener("click", () => updateBanner.classList.add("hidden"));
 serviceBannerInstall.addEventListener("click", installServiceFromBanner);
@@ -1671,6 +1979,7 @@ window.addEventListener("keydown", (e) => {
     selected < 0 ||
     confirmResolve !== null ||
     !settingsOverlay.classList.contains("hidden") ||
+    !builderOverlay.classList.contains("hidden") ||
     !confirmOverlay.classList.contains("hidden")
   ) {
     return;
@@ -1699,6 +2008,7 @@ window.addEventListener("keydown", (e) => {
     optMenu.classList.add("hidden");
     hideHistory();
     closeSettings();
+    closeBuilder();
     if (!confirmOverlay.classList.contains("hidden")) resolveConfirm(false);
   }
 });
@@ -1722,6 +2032,7 @@ applyTheme();
 setCols();
 renderHeader();
 buildSizeMenu();
+buildBuilderControls();
 syncControls();
 syncFoldersFirst();
 q.focus();

@@ -99,6 +99,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 | Bookmarks | ✅ | ❌ | |
 | Search history | ✅ | ✅ | Recent queries dropdown. |
 | Built-in / custom filters | ✅ | ❌ | Size presets only. |
+| Advanced-search dialog / builder | ✅ | ✅ | Toolbar **Builder**: composes a query from fields (name, contents, extensions, size, date, type, attributes, match) with a live preview. |
 | File lists (`.efu`) — create / open | ✅ | ⚠️ | Can **write** `.efu`; opening an `.efu` as a source not yet. |
 | Export results (TXT / CSV / EFU) | ✅ | ✅ | Toolbar **Export** → Save dialog; format from the chosen extension. |
 | Command-line interface (`es.exe`) | ✅ | ❌ | |
@@ -116,7 +117,7 @@ A reference for what AllTheThings has versus [voidtools Everything](https://www.
 4. **Localization.**
 5. **Bigger lifts:** **folder/ReFS indexing**, a **CLI**, an **HTTP** query interface, and a public IPC/SDK.
 
-_Recently shipped: **query grouping** `( )` (nestable; `a (b \| c)` = `a AND (b OR c)`); **light/dark/system theming**; a configurable **global hotkey** (summon/hide from anywhere) and an Explorer **"Search here"** folder context-menu entry; **the GUI runs without admin** — a LocalSystem background **service** indexes and the `asInvoker` GUI queries it over a query-only pipe (installer registers + starts the service; Settings manages it via an elevated relaunch), export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
+_Recently shipped: a **search builder** (toolbar Builder — composes a query from friendly fields with a live preview); **query grouping** `( )` (nestable; `a (b \| c)` = `a AND (b OR c)`); **light/dark/system theming**; a configurable **global hotkey** (summon/hide from anywhere) and an Explorer **"Search here"** folder context-menu entry; **the GUI runs without admin** — a LocalSystem background **service** indexes and the `asInvoker` GUI queries it over a query-only pipe (installer registers + starts the service; Settings manages it via an elevated relaunch), export results to CSV / TXT / EFU, folders-first sorting and sortable Ext / Attributes columns, right-click file actions (Delete to Recycle Bin, inline Rename/F2, Properties, Open with, Run as admin), date filters `dm:`/`dc:`/`da:` and `attrib:`, Created / Accessed / Type / Ext / Attributes columns with a header column picker, live USN updates now carry full metadata (size + all timestamps), boolean `\|`/`!`/`"…"`, match highlighting, search history._
 
 > This list is a guide, not a commitment — pick what's useful. The core engine
 > (instant MFT search, live USN updates, multi-volume, cache) is already at
