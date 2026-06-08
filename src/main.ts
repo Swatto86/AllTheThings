@@ -228,7 +228,7 @@ app.innerHTML = /* html */ `
         <span>Global hotkey<br><span class="hint" id="hotkey-hint">Click the box and press a key combo to summon the window from anywhere</span></span>
         <div class="svc-controls">
           <input type="text" id="hotkey-input" class="hotkey-input" readonly placeholder="Click & press keys" />
-          <button id="hotkey-clear" class="btn btn-xs">Off</button>
+          <button id="hotkey-clear" class="btn btn-xs hidden" title="Disable the global hotkey">Disable</button>
         </div>
       </div>
       <label class="settings-row">
@@ -967,6 +967,7 @@ async function loadSettings(): Promise<void> {
     setTray.checked = s.closeToTray;
     setExplorer.checked = s.explorerMenu;
     hotkeyInput.value = s.hotkey;
+    syncHotkeyControls();
     // Reconcile from reality: a stored hotkey that didn't bind (another app owns
     // it) is flagged rather than shown as silently working.
     const active = await invoke<boolean>("hotkey_active").catch(() => true);
@@ -1033,10 +1034,17 @@ async function setHotkey(accel: string): Promise<void> {
     await invoke("set_hotkey", { hotkey: accel });
     hotkeyInput.value = accel;
     hotkeyHint.textContent = HOTKEY_HINT; // just registered (or disabled) successfully
+    syncHotkeyControls();
   } catch (e) {
     settingsMsg.textContent = `${e}`;
     await loadSettings(); // revert the box to the still-registered hotkey
   }
+}
+
+// The "Disable" button is an action, not a status — only show it when a hotkey
+// is actually set, so an empty box reads clearly as "off".
+function syncHotkeyControls(): void {
+  hotkeyClear.classList.toggle("hidden", !hotkeyInput.value.trim());
 }
 
 // ---- Explorer "Search here" ----
@@ -1409,6 +1417,7 @@ setExplorer.addEventListener("change", saveSettings);
 hotkeyInput.addEventListener("focus", () => {
   hotkeyInput.value = "";
   hotkeyInput.placeholder = "Press a key combo…";
+  syncHotkeyControls();
 });
 hotkeyInput.addEventListener("blur", () => {
   hotkeyInput.placeholder = "Click & press keys";
