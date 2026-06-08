@@ -12,8 +12,9 @@ use crate::application::export::{self, ExportFormat};
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::fileops::{self, ShellVerb};
 use crate::infrastructure::service::scm::{self, SvcState};
-use crate::infrastructure::{elevation, icons, startup};
+use crate::infrastructure::{elevation, icons, shellmenu, startup};
 
+use super::hotkey;
 use super::settings::{self, Settings, SettingsState, StartFlags};
 use super::state::AppState;
 
@@ -96,17 +97,21 @@ pub fn file_type(ext: Option<String>, is_dir: bool) -> Option<String> {
     icons::type_name(ext.as_deref(), is_dir)
 }
 
-/// Current user settings, with `run_at_startup` reconciled against the real task.
+/// Current user settings, with the toggles backed by external state reconciled
+/// against reality: `run_at_startup` from the real logon task, `explorer_menu`
+/// from the real registry key.
 #[tauri::command]
 pub fn get_settings(state: State<'_, SettingsState>) -> Settings {
     let mut settings = state.0.read().clone();
     settings.run_at_startup = startup::task_exists();
+    settings.explorer_menu = shellmenu::is_registered();
     settings
 }
 
-/// Persist settings and apply side effects (register/unregister the logon task).
+/// Persist settings and apply side effects (logon task + Explorer menu). The
+/// global hotkey is owned by `set_hotkey` and preserved here untouched.
 #[tauri::command]
-pub fn set_settings(state: State<'_, SettingsState>, settings: Settings) -> Result<(), String> {
+pub fn set_settings(state: State<'_, SettingsState>, mut settings: Settings) -> Result<(), String> {
     // The logon task uses `/rl highest`, which needs admin to create or delete.
     // Only touch it when the toggle actually changed (reconciled from the real
     // task), and relaunch elevated when the GUI isn't — mirroring the service
@@ -123,9 +128,54 @@ pub fn set_settings(state: State<'_, SettingsState>, settings: Settings) -> Resu
             elevation::run_elevated(arg)?;
         }
     }
+
+    // The Explorer "Search here" entry lives under HKCU — no elevation needed.
+    if settings.explorer_menu != shellmenu::is_registered() {
+        if settings.explorer_menu {
+            shellmenu::register()?;
+        } else {
+            shellmenu::unregister()?;
+        }
+    }
+
+    // `hotkey` is owned by `set_hotkey` (it also (re)registers the shortcut), so
+    // keep the stored value rather than whatever the settings payload carries.
+    settings.hotkey = state.0.read().hotkey.clone();
     *state.0.write() = settings.clone();
     settings::save(&settings).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Set (and live-register) the global summon hotkey. An empty accelerator
+/// disables it. On failure the previously-registered hotkey is restored, so a
+/// rejected change never leaves the app with no working hotkey.
+#[tauri::command]
+pub fn set_hotkey(
+    app: tauri::AppHandle,
+    state: State<'_, SettingsState>,
+    hotkey: String,
+) -> Result<(), String> {
+    if let Err(e) = hotkey::apply(&app, &hotkey) {
+        let _ = hotkey::apply(&app, &state.0.read().hotkey);
+        return Err(e);
+    }
+    let mut settings = state.0.write();
+    settings.hotkey = hotkey;
+    settings::save(&settings).map_err(|e| e.to_string())
+}
+
+/// Whether the stored global hotkey is currently registered with the OS, so the
+/// UI can flag a hotkey that silently failed to bind (e.g. owned by another app).
+#[tauri::command]
+pub fn hotkey_active(app: tauri::AppHandle, state: State<'_, SettingsState>) -> bool {
+    hotkey::is_active(&app, &state.0.read().hotkey)
+}
+
+/// The folder passed via `--search-here` at launch (the Explorer context menu),
+/// for the frontend to scope its first search to. `None` for a normal launch.
+#[tauri::command]
+pub fn initial_search(flags: State<'_, StartFlags>) -> Option<String> {
+    flags.search_here.clone()
 }
 
 /// Register or unregister the elevated logon task directly (caller is elevated).

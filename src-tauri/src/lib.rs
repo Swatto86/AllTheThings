@@ -18,10 +18,10 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use presentation::commands::{
-    delete_path, export_results, file_icon, file_type, get_settings, index_status, install_service,
-    is_elevated, mark_service_prompt_seen, open_path, rename_path, reveal_path, search,
-    service_status, set_settings, setup_service, shell_action, start_hidden, start_service,
-    stop_service, uninstall_service, uses_service,
+    delete_path, export_results, file_icon, file_type, get_settings, hotkey_active, index_status,
+    initial_search, install_service, is_elevated, mark_service_prompt_seen, open_path, rename_path,
+    reveal_path, search, service_status, set_hotkey, set_settings, setup_service, shell_action,
+    start_hidden, start_service, stop_service, uninstall_service, uses_service,
 };
 use presentation::settings::{self, SettingsState, StartFlags};
 use presentation::state::AppState;
@@ -81,32 +81,64 @@ fn maybe_suggest_service(app: &AppHandle) {
     });
 }
 
+/// Extract the folder argument of `--search-here <path>` from a command line.
+fn parse_search_here(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--search-here" {
+            // A drive-root *background* click substitutes `%V` = `C:\`, and the
+            // trailing `\"` escapes the closing quote in Windows arg-parsing,
+            // arriving as e.g. `C:"`. Strip trailing quotes/backslashes so it
+            // still scopes to the drive root rather than a garbage path.
+            return it
+                .next()
+                .map(|p| p.trim_end_matches(['"', '\\']).to_string())
+                .filter(|p| !p.is_empty());
+        }
+    }
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let start_hidden_flag = std::env::args().any(|arg| arg == "--minimized");
+    let args: Vec<String> = std::env::args().collect();
+    let start_hidden_flag = args.iter().any(|arg| arg == "--minimized");
+    let search_here = parse_search_here(&args);
 
     // Detects the backend: queries the service if one is running, else starts
     // in-process indexing.
     let state = AppState::new();
     let settings = settings::load();
+    let initial_hotkey = settings.hotkey.clone();
 
     tauri::Builder::default()
-        // single-instance must be registered first: a second launch focuses
-        // the running window instead of opening a duplicate.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // single-instance must be registered first: a second launch focuses the
+        // running window (and, for an Explorer "Search here", scopes it to that
+        // folder) instead of opening a duplicate.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             show_main(app);
+            if let Some(path) = parse_search_here(&argv) {
+                let _ = app.emit("search-here", path);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
         .manage(SettingsState(RwLock::new(settings)))
         .manage(StartFlags {
             start_hidden: start_hidden_flag,
+            search_here,
         })
         .setup(move |app| {
             build_tray(app.handle())?;
+            // Register the saved global hotkey; a failure (e.g. another app owns
+            // it) is non-fatal — the app just starts without it.
+            if let Err(e) = presentation::hotkey::apply(app.handle(), &initial_hotkey) {
+                eprintln!("[hotkey] {e}");
+            }
             // Reveal the window after a delay unless we launched into the tray.
             // (The frontend normally shows it sooner, once painted.)
             if !start_hidden_flag {
@@ -156,7 +188,10 @@ pub fn run() {
             stop_service,
             setup_service,
             mark_service_prompt_seen,
-            is_elevated
+            is_elevated,
+            set_hotkey,
+            hotkey_active,
+            initial_search
         ])
         .run(tauri::generate_context!())
         .expect("error while running AllTheThings");

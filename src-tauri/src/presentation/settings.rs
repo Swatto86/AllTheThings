@@ -11,9 +11,15 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     /// Closing the window hides it to the tray instead of quitting.
     pub close_to_tray: bool,
-    /// Whether the elevated logon scheduled task is registered. Reconciled
-    /// against the real task on read.
+    /// Whether the logon scheduled task is registered. Reconciled against the
+    /// real task on read.
     pub run_at_startup: bool,
+    /// Whether the Explorer "Search here" context-menu entry is registered.
+    /// Reconciled against the real registry key on read.
+    pub explorer_menu: bool,
+    /// Global hotkey accelerator that summons the window (e.g. `"Ctrl+Alt+Space"`);
+    /// an empty string disables it. Owned by the `set_hotkey` command.
+    pub hotkey: String,
 }
 
 impl Default for Settings {
@@ -21,6 +27,8 @@ impl Default for Settings {
         Self {
             close_to_tray: true,
             run_at_startup: false,
+            explorer_menu: false,
+            hotkey: "Ctrl+Alt+Space".into(),
         }
     }
 }
@@ -31,6 +39,9 @@ pub struct SettingsState(pub RwLock<Settings>);
 /// Launch flags derived from the command line (not persisted).
 pub struct StartFlags {
     pub start_hidden: bool,
+    /// A folder passed via `--search-here` (the Explorer context menu) for the
+    /// first instance to scope its initial search to.
+    pub search_here: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {

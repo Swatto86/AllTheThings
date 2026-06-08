@@ -209,7 +209,7 @@ app.innerHTML = /* html */ `
     <div class="settings-panel">
       <div class="settings-title">Settings</div>
       <label class="settings-row">
-        <span>Start with Windows<br><span class="hint">Launches the app at sign-in (elevated, minimized to the tray) so search is ready</span></span>
+        <span>Start with Windows<br><span class="hint">Launches the app into the tray at sign-in so search is ready</span></span>
         <input type="checkbox" id="set-startup" class="toggle toggle-sm toggle-primary" />
       </label>
       <div class="settings-row">
@@ -223,6 +223,17 @@ app.innerHTML = /* html */ `
       <label class="settings-row">
         <span>Close button minimizes to tray<br><span class="hint">Otherwise the window closing quits the app</span></span>
         <input type="checkbox" id="set-tray" class="toggle toggle-sm toggle-primary" />
+      </label>
+      <div class="settings-row">
+        <span>Global hotkey<br><span class="hint" id="hotkey-hint">Click the box and press a key combo to summon the window from anywhere</span></span>
+        <div class="svc-controls">
+          <input type="text" id="hotkey-input" class="hotkey-input" readonly placeholder="Click & press keys" />
+          <button id="hotkey-clear" class="btn btn-xs">Off</button>
+        </div>
+      </div>
+      <label class="settings-row">
+        <span>Explorer right-click "Search here"<br><span class="hint">Adds "Search AllTheThings here" to folder menus (under "Show more options" on Windows 11)</span></span>
+        <input type="checkbox" id="set-explorer" class="toggle toggle-sm toggle-primary" />
       </label>
       <div class="settings-row">
         <span>Updates<br><span class="hint" id="update-status">AllTheThings checks for updates on launch.</span></span>
@@ -268,6 +279,11 @@ const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overlay")!;
 const setStartup = document.querySelector<HTMLInputElement>("#set-startup")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
+const setExplorer = document.querySelector<HTMLInputElement>("#set-explorer")!;
+const hotkeyInput = document.querySelector<HTMLInputElement>("#hotkey-input")!;
+const hotkeyClear = document.querySelector<HTMLButtonElement>("#hotkey-clear")!;
+const hotkeyHint = document.querySelector<HTMLSpanElement>("#hotkey-hint")!;
+const HOTKEY_HINT = "Click the box and press a key combo to summon the window from anywhere";
 const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
 const settingsClose = document.querySelector<HTMLButtonElement>("#settings-close")!;
 const svcState = document.querySelector<HTMLSpanElement>("#svc-state")!;
@@ -940,6 +956,8 @@ function syncFoldersFirst(): void {
 interface Settings {
   closeToTray: boolean;
   runAtStartup: boolean;
+  explorerMenu: boolean;
+  hotkey: string;
 }
 
 async function loadSettings(): Promise<void> {
@@ -947,6 +965,15 @@ async function loadSettings(): Promise<void> {
     const s = await invoke<Settings>("get_settings");
     setStartup.checked = s.runAtStartup;
     setTray.checked = s.closeToTray;
+    setExplorer.checked = s.explorerMenu;
+    hotkeyInput.value = s.hotkey;
+    // Reconcile from reality: a stored hotkey that didn't bind (another app owns
+    // it) is flagged rather than shown as silently working.
+    const active = await invoke<boolean>("hotkey_active").catch(() => true);
+    hotkeyHint.textContent =
+      s.hotkey && !active
+        ? "Inactive — another app may already use this combo; pick another."
+        : HOTKEY_HINT;
     settingsMsg.textContent = "";
   } catch (e) {
     settingsMsg.textContent = `Could not load settings: ${e}`;
@@ -957,12 +984,81 @@ async function saveSettings(): Promise<void> {
   settingsMsg.textContent = "";
   try {
     await invoke("set_settings", {
-      settings: { runAtStartup: setStartup.checked, closeToTray: setTray.checked },
+      settings: {
+        runAtStartup: setStartup.checked,
+        closeToTray: setTray.checked,
+        explorerMenu: setExplorer.checked,
+        hotkey: hotkeyInput.value, // ignored by the backend; owned by set_hotkey
+      },
     });
   } catch (e) {
     settingsMsg.textContent = `${e}`;
     await loadSettings(); // re-sync toggles with reality (e.g. task creation failed)
   }
+}
+
+// ---- Global hotkey capture ----
+// Map a KeyboardEvent.code to a Tauri accelerator key name, or null if it isn't
+// a usable hotkey key.
+function hotkeyKeyName(code: string): string | null {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
+  if (code === "Space") return "Space";
+  const named: Record<string, string> = {
+    ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    Enter: "Enter", Tab: "Tab", Home: "Home", End: "End",
+    PageUp: "PageUp", PageDown: "PageDown", Insert: "Insert", Delete: "Delete",
+  };
+  return named[code] ?? null;
+}
+
+// Build "Ctrl+Alt+Space"-style accelerators. Requires at least one modifier — a
+// bare key would be captured system-wide.
+// Note: the Windows key is intentionally not offered — the plugin's parser
+// rejects a "Win" token, and most Win combos are reserved by the OS anyway.
+function accelFromEvent(e: KeyboardEvent): string | null {
+  const key = hotkeyKeyName(e.code);
+  if (!key) return null;
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push("Ctrl");
+  if (e.altKey) mods.push("Alt");
+  if (e.shiftKey) mods.push("Shift");
+  return mods.length ? [...mods, key].join("+") : null;
+}
+
+async function setHotkey(accel: string): Promise<void> {
+  settingsMsg.textContent = "";
+  try {
+    await invoke("set_hotkey", { hotkey: accel });
+    hotkeyInput.value = accel;
+    hotkeyHint.textContent = HOTKEY_HINT; // just registered (or disabled) successfully
+  } catch (e) {
+    settingsMsg.textContent = `${e}`;
+    await loadSettings(); // revert the box to the still-registered hotkey
+  }
+}
+
+// ---- Explorer "Search here" ----
+// Scope the view to a folder (from the right-click context menu). Uses
+// match-path mode + a quoted path phrase so it works for paths with spaces; the
+// user can then append a filename to filter within the folder.
+function searchHere(path: string): void {
+  if (!path) return;
+  const folder = path.replace(/[\\/]+$/, "") + "\\";
+  // The scope query is a literal quoted path phrase, so force literal match-path
+  // mode regardless of the current toggles (regex would fail to compile it).
+  options.matchPath = true;
+  options.regex = false;
+  options.wholeWord = false;
+  syncControls();
+  q.value = `"${folder}" `;
+  options.query = q.value;
+  runSearch();
+  getCurrentWindow().show().catch(() => {});
+  getCurrentWindow().setFocus().catch(() => {});
+  q.focus();
+  q.setSelectionRange(q.value.length, q.value.length);
 }
 
 function openSettings(): void {
@@ -1309,6 +1405,40 @@ serviceBannerLater.addEventListener("click", () => serviceBanner.classList.add("
 checkUpdates.addEventListener("click", () => checkForUpdates(true));
 setStartup.addEventListener("change", saveSettings);
 setTray.addEventListener("change", saveSettings);
+setExplorer.addEventListener("change", saveSettings);
+hotkeyInput.addEventListener("focus", () => {
+  hotkeyInput.value = "";
+  hotkeyInput.placeholder = "Press a key combo…";
+});
+hotkeyInput.addEventListener("blur", () => {
+  hotkeyInput.placeholder = "Click & press keys";
+  // Restore the stored value only if nothing was captured (focus cleared the
+  // box); a committed capture leaves its new accelerator in place.
+  if (!hotkeyInput.value) loadSettings();
+});
+hotkeyInput.addEventListener("keydown", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.key === "Escape") {
+    hotkeyInput.blur();
+    return;
+  }
+  // While only modifiers are held, preview them; commit on a real key.
+  if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+    const held: string[] = [];
+    if (e.ctrlKey) held.push("Ctrl");
+    if (e.altKey) held.push("Alt");
+    if (e.shiftKey) held.push("Shift");
+    hotkeyInput.value = held.length ? held.join("+") + "+…" : "";
+    return;
+  }
+  const accel = accelFromEvent(e);
+  if (accel) {
+    // Commit, then blur — so the blur handler's restore can't clobber the new value.
+    void setHotkey(accel).then(() => hotkeyInput.blur());
+  }
+});
+hotkeyClear.addEventListener("click", () => void setHotkey(""));
 svcInstall.addEventListener("click", () => {
   const action = svcInstall.dataset.action;
   if (action === "install") serviceAction("install_service");
@@ -1329,6 +1459,8 @@ listen("suggest-service", () => {
   // Mark seen on actual delivery, so a lost/early event re-offers next launch.
   invoke("mark_service_prompt_seen").catch(() => {});
 });
+// A running instance receiving an Explorer "Search here" launch.
+listen<string>("search-here", (e) => searchHere(e.payload));
 
 // Confirm dialog
 confirmOk.addEventListener("click", () => resolveConfirm(true));
@@ -1417,6 +1549,12 @@ invoke<boolean>("uses_service")
   })
   .catch(() => {});
 pollStatus();
+// If launched via Explorer "Search here", scope the first search to that folder.
+invoke<string | null>("initial_search")
+  .then((path) => {
+    if (path) searchHere(path);
+  })
+  .catch(() => {});
 
 // Reveal the window after paint — unless launched into the tray (--minimized).
 requestAnimationFrame(() =>

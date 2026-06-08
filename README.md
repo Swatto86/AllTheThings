@@ -29,8 +29,10 @@ Measured on the developer's machine: **1.13M files indexed in ~3.4 s** (cold), s
 - **System tray**: minimise/close to tray; Show / Settings / Quit menu; left-click to restore.
 - **Auto-updates**: on launch it checks GitHub Releases for a newer **signed** build; an in-app banner offers one-click *Install & restart*. Also available from Settings → *Check now*.
 - **Runs without admin** — indexing is delegated to a **background service** (`AllTheThingsSvc`, LocalSystem) that the installer registers and starts; the GUI runs `asInvoker` (unelevated) and queries it over a **query-only**, same-machine named pipe (the status bar shows *· via service*). All file actions (open/rename/delete/…) run in **your own** user context, never the service's. Manage the service (install / start / stop / uninstall) from **Settings** — a UAC prompt appears only when the GUI isn't already elevated.
-- **Run at startup** (Settings): registers a logon scheduled task that auto-launches the app into the tray at sign-in. It runs elevated (`/rl highest`) so it can also index **in-process as a fallback** when the service isn't available.
-- **Settings**: start-with-Windows, optional background-service management, and close-to-tray, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
+- **Run at startup** (Settings): registers a logon scheduled task that auto-launches the app (unelevated) into the tray at sign-in, ready to search.
+- **Global hotkey** (Settings): a configurable system-wide shortcut (default **Ctrl+Alt+Space**) that summons — or hides — the window from anywhere. Click the box in Settings and press a key combo to change it, or turn it off.
+- **Explorer "Search here"** (Settings): adds a **"Search AllTheThings here"** entry to folder right-click menus — opens the app scoped to that folder so you can filter within it. Per-user (no admin); on Windows 11 it lives under *Show more options*.
+- **Settings**: global hotkey, Explorer integration, start-with-Windows, background-service management, and close-to-tray, persisted to `%LOCALAPPDATA%\AllTheThings\settings.json`.
 - **Keyboard**: type to filter, ↑/↓ to move, Enter to open.
 
 See [**docs/PARITY.md**](docs/PARITY.md) for a full feature-by-feature comparison with voidtools Everything and the roadmap.

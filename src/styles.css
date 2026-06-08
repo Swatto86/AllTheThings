@@ -227,6 +227,22 @@ mark.hl {
   opacity: 0.7;
   white-space: nowrap;
 }
+.hotkey-input {
+  width: 150px;
+  font-size: 12px;
+  text-align: center;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e5e7eb;
+  cursor: pointer;
+  caret-color: transparent;
+}
+.hotkey-input:focus {
+  outline: none;
+  border-color: oklch(var(--p));
+}
 .settings-msg {
   min-height: 18px;
   font-size: 12px;
