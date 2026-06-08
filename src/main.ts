@@ -159,6 +159,9 @@ let highlightTerms: string[] = [];
 let resizing = false;
 let dragSrc: ColKey | null = null;
 let renamingIndex = -1;
+// The Hit being renamed, captured by reference so a commit always targets the
+// right file even if a background search replaces `hits` while the box is open.
+let renamingHit: Hit | null = null;
 let suppressScrollCancel = false;
 
 const iconCache = new Map<string, string>(); // key -> "data:..." | "none"
@@ -587,6 +590,10 @@ function computeHighlightTerms(query: string, regex: boolean): string[] {
 function highlight(raw: string): string {
   if (!highlightTerms.length) return esc(raw);
   const lower = raw.toLowerCase();
+  // toLowerCase can change UTF-16 length (e.g. İ U+0130 -> "i̇"), which
+  // would desync the lowercased match indices from the original string and mark
+  // the wrong characters. Such names are rare — just skip highlighting them.
+  if (lower.length !== raw.length) return esc(raw);
   const ranges: [number, number][] = [];
   for (const t of highlightTerms) {
     let i = lower.indexOf(t);
@@ -995,24 +1002,28 @@ function startRename(): void {
   const dot = h.name.lastIndexOf(".");
   renameInput.setSelectionRange(0, dot > 0 ? dot : h.name.length);
   renamingIndex = selected;
+  renamingHit = h;
 }
 
 function cancelRename(): void {
   if (renamingIndex < 0) return;
   renamingIndex = -1;
+  renamingHit = null;
   renameInput.classList.add("hidden");
 }
 
 async function commitRename(restoreFocus: boolean): Promise<void> {
   if (renamingIndex < 0) return;
-  const idx = renamingIndex;
-  const h = hits[idx];
+  // Operate on the captured Hit, not hits[renamingIndex]: a background search may
+  // have replaced `hits` while the box was open, so the stale index could point
+  // at a different file (wrong-file rename) or be out of range (TypeError).
+  const h = renamingHit;
   const newName = renameInput.value.trim();
   cancelRename();
   // On Enter, return focus to the search box so keyboard nav keeps working; on
   // blur, leave focus wherever the user clicked.
   if (restoreFocus) q.focus();
-  if (!newName || newName === h.name) return;
+  if (!h || !newName || newName === h.name) return;
   try {
     const newPath = await invoke<string>("rename_path", { path: h.path, newName });
     h.name = newName;
@@ -1026,10 +1037,18 @@ async function commitRename(restoreFocus: boolean): Promise<void> {
 async function deleteSelected(): Promise<void> {
   if (selected < 0 || selected >= hits.length || confirmResolve !== null) return;
   const h = hits[selected];
+  const seq = searchSeq;
   if (!(await confirmDelete(h.name))) return;
   try {
     await invoke("delete_path", { path: h.path });
-    hits.splice(selected, 1);
+    // A background search may have replaced `hits` (and reset `selected`) while
+    // the confirm dialog was open. If so it already reflects current state —
+    // don't splice by the stale index, which would drop the wrong row and skew
+    // the count. Otherwise remove the row by identity, not the cached index.
+    if (seq !== searchSeq) return;
+    const idx = hits.indexOf(h);
+    if (idx < 0) return;
+    hits.splice(idx, 1);
     total = Math.max(0, total - 1);
     if (selected >= hits.length) selected = hits.length - 1;
     spacer.style.height = `${hits.length * ROW_HEIGHT}px`;
