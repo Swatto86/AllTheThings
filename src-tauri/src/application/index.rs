@@ -21,8 +21,11 @@ use crate::domain::{FileEntry, RecordId};
 const ROOT_RECORD: u64 = 5;
 /// Milliseconds between the Windows (1601) and Unix (1970) epochs.
 const FILETIME_UNIX_DIFF_MS: i64 = 11_644_473_600_000;
-/// Guard against malformed parent cycles when walking to the root.
-const MAX_PATH_DEPTH: usize = 256;
+/// Guard against malformed parent cycles when walking to the root. Set far above
+/// any real NTFS nesting (a legitimate tree never approaches this) so the cap
+/// only ever fires on a corrupt parent cycle — not on a genuinely deep path,
+/// which would otherwise be silently truncated to a wrong-but-absolute path.
+const MAX_PATH_DEPTH: usize = 4096;
 
 fn filetime_to_unix_ms(ft: u64) -> Option<i64> {
     if ft == 0 {

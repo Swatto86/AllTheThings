@@ -283,6 +283,23 @@ pub fn extract_content(query: &str) -> (String, Vec<String>) {
     let mut i = 0;
 
     while i < chars.len() {
+        // A quoted phrase is opaque: copy it verbatim and never treat a
+        // `content:` inside it as the operator, so `"a content:b"` stays a
+        // literal name phrase (matching the documented quoting rule).
+        if chars[i] == '"' {
+            rest.push(chars[i]);
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                rest.push(chars[i]);
+                i += 1;
+            }
+            if i < chars.len() {
+                rest.push(chars[i]); // closing quote
+                i += 1;
+            }
+            continue;
+        }
+
         let at_boundary = i == 0 || chars[i - 1].is_whitespace();
         let is_kw = at_boundary
             && i + KW.len() <= chars.len()
@@ -508,6 +525,15 @@ fn flush_word(buf: &mut String, tokens: &mut Vec<Token>) {
     }
 }
 
+/// Case-insensitively strip an ASCII operator prefix (`size:`, `ext:`, …),
+/// returning the remainder. The prefixes are all ASCII, so `Size:`/`EXT:` are
+/// treated the same as `size:`/`ext:` — consistent with `file:`/`folder:`.
+fn strip_prefix_ci<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = word.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &word[prefix.len()..])
+}
+
 /// Parse a bare word into a predicate: a function (`ext:`/`size:`/`file:`/
 /// `folder:`/`path:`) or a text match.
 fn parse_word(
@@ -524,11 +550,14 @@ fn parse_word(
     {
         return Ok(Some(Pred::Folder));
     }
-    if let Some(v) = word.strip_prefix("ext:") {
+    if let Some(v) = strip_prefix_ci(word, "ext:") {
+        // Fold with Unicode `to_lowercase` to match the index's `name_lower`
+        // (the haystack is folded the same way); `to_ascii_lowercase` would
+        // miss non-ASCII extensions.
         let exts: Vec<String> = v
             .split([';', ','])
             .filter(|e| !e.is_empty())
-            .map(|e| e.to_ascii_lowercase())
+            .map(|e| e.to_lowercase())
             .collect();
         return Ok(if exts.is_empty() {
             None
@@ -536,22 +565,22 @@ fn parse_word(
             Some(Pred::Ext(exts))
         });
     }
-    if let Some(v) = word.strip_prefix("size:") {
+    if let Some(v) = strip_prefix_ci(word, "size:") {
         return Ok(parse_size_filter(v).map(Pred::Size));
     }
-    if let Some(v) = word.strip_prefix("dm:") {
+    if let Some(v) = strip_prefix_ci(word, "dm:") {
         return Ok(date_pred(v, DateField::Modified));
     }
-    if let Some(v) = word.strip_prefix("dc:") {
+    if let Some(v) = strip_prefix_ci(word, "dc:") {
         return Ok(date_pred(v, DateField::Created));
     }
-    if let Some(v) = word.strip_prefix("da:") {
+    if let Some(v) = strip_prefix_ci(word, "da:") {
         return Ok(date_pred(v, DateField::Accessed));
     }
-    if let Some(v) = word.strip_prefix("attrib:") {
+    if let Some(v) = strip_prefix_ci(word, "attrib:") {
         return Ok(parse_attrib(v).map(Pred::Attrib));
     }
-    if let Some(v) = word.strip_prefix("path:") {
+    if let Some(v) = strip_prefix_ci(word, "path:") {
         *needs_path = true;
         return Ok(text_pred(v, TextTarget::Path, opts));
     }
@@ -673,8 +702,26 @@ fn glob_pattern(glob: &str) -> String {
     p
 }
 
+/// Whole-word pattern. `\b` only fires at a word/non-word transition, so a token
+/// that begins or ends with a non-word character (`.gitignore`, `C++`, `+++`)
+/// could never satisfy `\b` at that edge and matched nothing. For a non-word
+/// edge, fall back to a non-word-or-anchor alternation instead. The regex crate
+/// has no lookaround, so the alternation consumes the boundary char — fine here,
+/// since the predicate only uses `is_match` (a boolean), never the match span.
 fn word_pattern(token: &str) -> String {
-    format!(r"\b{}\b", regex::escape(token))
+    fn is_word(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    let esc = regex::escape(token);
+    let lead = match token.chars().next() {
+        Some(c) if is_word(c) => r"\b",
+        _ => r"(?:^|\W)",
+    };
+    let trail = match token.chars().next_back() {
+        Some(c) if is_word(c) => r"\b",
+        _ => r"(?:\W|$)",
+    };
+    format!("{lead}{esc}{trail}")
 }
 
 /// Parse a `size:` value such as `>100mb`, `<=1gb`, `>=512`, or `4kb`.
@@ -941,6 +988,15 @@ mod tests {
         .unwrap()
     }
 
+    fn ww_matcher(query: &str) -> Matcher {
+        Matcher::compile(&SearchOptions {
+            query: query.into(),
+            whole_word: true,
+            ..SearchOptions::default()
+        })
+        .unwrap()
+    }
+
     fn view<'a>(
         name: &'a str,
         name_lower: &'a str,
@@ -1081,6 +1137,50 @@ mod tests {
         let m = matcher("report");
         assert!(!m.needs_path());
         assert!(hits(&m, "report.pdf", false, None));
+    }
+
+    #[test]
+    fn whole_word_matches_punctuation_edged_names() {
+        // `\b` cannot bound a token that starts/ends with punctuation, so these
+        // used to return nothing; they must match a file whose whole name is the
+        // token, while still rejecting non-whole-word occurrences.
+        assert!(hits(&ww_matcher(".gitignore"), ".gitignore", false, None));
+        assert!(!hits(&ww_matcher(".gitignore"), "x.gitignore", false, None));
+        assert!(hits(&ww_matcher("C++"), "C++", false, None));
+        assert!(hits(&ww_matcher("+++"), "+++", false, None));
+        // An ordinary word token still behaves as a whole-word match.
+        assert!(hits(&ww_matcher("report"), "the report.txt", false, None));
+        assert!(!hits(&ww_matcher("report"), "reporter.txt", false, None));
+    }
+
+    #[test]
+    fn function_prefixes_are_case_insensitive() {
+        assert!(hits(
+            &matcher("SIZE:>1mb"),
+            "big.bin",
+            false,
+            Some(2 * 1024 * 1024)
+        ));
+        assert!(!hits(&matcher("Size:>1mb"), "small.bin", false, Some(1024)));
+        assert!(hits(&matcher("EXT:dll"), "user32.dll", false, None));
+        assert!(eval_modified(&matcher("DM:2024"), Some(1_718_452_800_000)));
+        // A drive-letter path (`D:`) must NOT be mistaken for a function prefix.
+        assert!(matcher("D:").needs_path());
+    }
+
+    #[test]
+    fn ext_filter_folds_non_ascii() {
+        // `ext:` must Unicode-lowercase to match the index's `name_lower`.
+        assert!(hits(&matcher("ext:CAFÉ"), "x.CAFÉ", false, None));
+        assert!(hits(&matcher("ext:café"), "x.CAFÉ", false, None));
+    }
+
+    #[test]
+    fn content_inside_quotes_stays_literal() {
+        // A `content:` inside a quoted phrase is literal text, not the operator.
+        let (rest, terms) = extract_content("\"report content:secret\"");
+        assert_eq!(rest, "\"report content:secret\"");
+        assert!(terms.is_empty());
     }
 
     #[test]
