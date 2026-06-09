@@ -454,6 +454,16 @@ function extOf(name: string): string {
   return i > 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
+// Extension used for icon/type lookup. Unlike the displayed Ext column (extOf,
+// which blanks dotfiles), a dotfile uses its own name (.gitignore -> "gitignore")
+// so the shell's per-name icon/type association resolves.
+function iconExtOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  if (i > 0) return name.slice(i + 1).toLowerCase();
+  if (i === 0 && name.length > 1) return name.slice(1).toLowerCase();
+  return "";
+}
+
 // FILE_ATTRIBUTE_* bits → Explorer-style letters, in display order.
 const ATTR_LETTERS: [number, string][] = [
   [0x1, "R"], // readonly
@@ -660,14 +670,16 @@ function highlight(raw: string): string {
 
 // ---- Icons ----
 function iconKey(h: Hit): string {
-  return h.isDir ? "dir" : extOf(h.name) || "file";
+  // Namespace the directory/extensionless sentinels with NUL (illegal in an
+  // extension) so a file with extension "dir"/"file" can't poison their bucket.
+  return h.isDir ? "\0dir" : iconExtOf(h.name) || "\0noext";
 }
 
 function ensureIcon(h: Hit): void {
   const key = iconKey(h);
   if (iconCache.has(key) || iconPending.has(key)) return;
   iconPending.add(key);
-  invoke<string | null>("file_icon", { ext: h.isDir ? null : extOf(h.name), isDir: h.isDir })
+  invoke<string | null>("file_icon", { ext: h.isDir ? null : iconExtOf(h.name), isDir: h.isDir })
     .then((b64) => {
       iconCache.set(key, b64 ? `data:image/png;base64,${b64}` : "none");
       if (b64) queueIconRerender();
@@ -699,14 +711,14 @@ const typeCache = new Map<string, string>(); // key -> friendly type name
 const typePending = new Set<string>();
 
 function typeKey(h: Hit): string {
-  return h.isDir ? "dir" : extOf(h.name) || "file";
+  return h.isDir ? "\0dir" : iconExtOf(h.name) || "\0noext";
 }
 
 function ensureType(h: Hit): void {
   const key = typeKey(h);
   if (typeCache.has(key) || typePending.has(key)) return;
   typePending.add(key);
-  invoke<string | null>("file_type", { ext: h.isDir ? null : extOf(h.name), isDir: h.isDir })
+  invoke<string | null>("file_type", { ext: h.isDir ? null : iconExtOf(h.name), isDir: h.isDir })
     .then((t) => {
       typeCache.set(key, t ?? "");
       if (t) queueIconRerender();
@@ -957,6 +969,10 @@ async function pollStatus(): Promise<void> {
     }
     if (s.state === "indexing") {
       window.setTimeout(pollStatus, 350);
+    } else if (s.state === "error") {
+      // A transient backend/service error must not stop polling forever — keep
+      // checking (with a backoff) so the bar self-heals when it recovers.
+      window.setTimeout(pollStatus, 2000);
     } else {
       runSearch();
     }
@@ -1787,8 +1803,10 @@ async function installServiceFromBanner(): Promise<void> {
 
 // ---- Auto-update ----
 let pendingUpdate: Update | null = null;
+let updating = false; // an install is in flight — guards re-entrancy
 
 async function checkForUpdates(manual: boolean): Promise<void> {
+  if (updating) return; // never disturb an install in progress
   if (manual) updateStatus.textContent = "Checking…";
   try {
     const update = await check();
@@ -1798,7 +1816,10 @@ async function checkForUpdates(manual: boolean): Promise<void> {
       updateBanner.classList.remove("hidden");
       if (manual) updateStatus.textContent = `Update ${update.version} available — see the banner.`;
     } else {
+      // No update: clear state AND hide the banner so a stale banner can't keep
+      // advertising an update whose Install button would then silently no-op.
       pendingUpdate = null;
+      updateBanner.classList.add("hidden");
       if (manual) updateStatus.textContent = "You're on the latest version.";
     }
   } catch (e) {
@@ -1807,27 +1828,37 @@ async function checkForUpdates(manual: boolean): Promise<void> {
 }
 
 async function installUpdate(): Promise<void> {
-  if (!pendingUpdate) return;
-  updateBanner.classList.add("hidden");
+  if (updating || !pendingUpdate) return;
+  updating = true;
+  updateInstall.disabled = true;
+  const update = pendingUpdate;
+  // Show progress/failure in the banner (a persistent surface), NOT the shared
+  // status bar, which the periodic indexing/search updates would overwrite.
   let total = 0;
   let downloaded = 0;
   try {
-    await pendingUpdate.downloadAndInstall((event) => {
+    await update.downloadAndInstall((event) => {
       if (event.event === "Started") {
         total = event.data.contentLength ?? 0;
-        statusEl.textContent = "Downloading update…";
+        updateText.textContent = "Downloading update…";
       } else if (event.event === "Progress") {
         downloaded += event.data.chunkLength;
-        statusEl.textContent = total
+        updateText.textContent = total
           ? `Downloading update… ${Math.round((downloaded / total) * 100)}%`
           : "Downloading update…";
       } else if (event.event === "Finished") {
-        statusEl.textContent = "Installing update…";
+        updateText.textContent = "Installing update…";
       }
     });
     await relaunch();
   } catch (e) {
-    statusEl.textContent = `Update failed: ${e}`;
+    // Download/install/relaunch failed. The new version may already be staged, so
+    // keep the banner up (with the Install button re-enabled) so the user can
+    // retry, and tell them a manual restart will finish a staged update.
+    updateText.textContent = `Update failed: ${e}. Try again, or restart the app to finish.`;
+    updateBanner.classList.remove("hidden");
+    updateInstall.disabled = false;
+    updating = false;
   }
 }
 
@@ -2030,13 +2061,21 @@ window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change"
 hotkeyInput.addEventListener("focus", () => {
   hotkeyInput.value = "";
   hotkeyInput.placeholder = "Press a key combo…";
+  // Suspend the live global shortcut so pressing the currently-bound combo is
+  // delivered to this box instead of triggering it (which would hide the window).
+  invoke("suspend_hotkey").catch(() => {});
   syncHotkeyControls();
 });
 hotkeyInput.addEventListener("blur", () => {
   hotkeyInput.placeholder = "Click & press keys";
   // Restore the stored value only if nothing was captured (focus cleared the
-  // box); a committed capture leaves its new accelerator in place.
-  if (!hotkeyInput.value) loadSettings();
+  // box); a committed capture leaves its new accelerator in place. When nothing
+  // was committed, re-register the global shortcut that focus suspended (a
+  // committed capture already re-registered via set_hotkey).
+  if (!hotkeyInput.value) {
+    loadSettings();
+    invoke("resume_hotkey").catch(() => {});
+  }
 });
 hotkeyInput.addEventListener("keydown", (e) => {
   e.preventDefault();
