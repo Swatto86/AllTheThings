@@ -78,7 +78,7 @@ const SIZE_PRESETS: [string, string][] = [
   ["Medium (100 KB – 1 MB)", "size:>=100kb size:<1mb"],
   ["Large (1 MB – 16 MB)", "size:>=1mb size:<16mb"],
   ["Huge (16 MB – 128 MB)", "size:>=16mb size:<128mb"],
-  ["Gigantic (> 128 MB)", "size:>128mb"],
+  ["Gigantic (≥ 128 MB)", "size:>=128mb"],
 ];
 
 const FOLDERS_FIRST_KEY = "att.foldersFirst";
@@ -156,6 +156,8 @@ let selected = -1;
 let searchSeq = 0;
 let debounce: number | undefined;
 let highlightTerms: string[] = [];
+let highlightWholeWord = false; // mirror the engine's whole-word boundaries
+let highlightMatchCase = false; // mirror the engine's case sensitivity
 let resizing = false;
 let dragSrc: ColKey | null = null;
 let renamingIndex = -1;
@@ -540,7 +542,7 @@ function tokenizeQuery(query: string): QToken[] {
 // matcher is the Rust query parser. It tracks negation parity and group scope
 // so a term inside a negated group (`!(a | b)`, `report !old`) is NOT marked
 // (`!!x` cancels back to positive, mirroring the backend).
-function computeHighlightTerms(query: string, regex: boolean): string[] {
+function computeHighlightTerms(query: string, regex: boolean, matchCase: boolean): string[] {
   if (regex) return [];
   const terms: string[] = [];
   let negated = false; // cumulative NOT parity at the current point
@@ -566,7 +568,7 @@ function computeHighlightTerms(query: string, regex: boolean): string[] {
       case "phrase": {
         const neg = negated !== pending;
         pending = false;
-        if (!neg && t.text) terms.push(t.text.toLowerCase());
+        if (!neg && t.text) terms.push(matchCase ? t.text : t.text.toLowerCase());
         break;
       }
       case "word": {
@@ -578,7 +580,7 @@ function computeHighlightTerms(query: string, regex: boolean): string[] {
         if (/^(ext|size|file|files|folder|folders|dir|dm|dc|da|attrib):/.test(lower)) break;
         if (lower.startsWith("path:")) tok = tok.slice(5);
         if (!tok || tok.includes("*") || tok.includes("?")) break;
-        terms.push(tok.toLowerCase());
+        terms.push(matchCase ? tok : tok.toLowerCase());
         break;
       }
     }
@@ -586,20 +588,38 @@ function computeHighlightTerms(query: string, regex: boolean): string[] {
   return terms;
 }
 
-// Escape `raw` and wrap any matched term occurrences in <mark>.
+const HL_WORD = /[\p{L}\p{N}_]/u;
+
+// Whether an occurrence at [start, start+len) sits on word boundaries, mirroring
+// the engine's whole-word semantics (a word-char edge needs a non-word/absent
+// neighbour; a non-word-char edge is always bounded).
+function highlightBounded(hay: string, start: number, len: number): boolean {
+  const before = start > 0 ? hay[start - 1] : "";
+  const after = start + len < hay.length ? hay[start + len] : "";
+  const leadOk = !HL_WORD.test(hay[start]) || before === "" || !HL_WORD.test(before);
+  const trailOk =
+    !HL_WORD.test(hay[start + len - 1]) || after === "" || !HL_WORD.test(after);
+  return leadOk && trailOk;
+}
+
+// Escape `raw` and wrap any matched term occurrences in <mark>. Mirrors the
+// engine's case-sensitivity and whole-word flags so the marks reflect the actual
+// match, not every substring.
 function highlight(raw: string): string {
   if (!highlightTerms.length) return esc(raw);
-  const lower = raw.toLowerCase();
-  // toLowerCase can change UTF-16 length (e.g. İ U+0130 -> "i̇"), which
-  // would desync the lowercased match indices from the original string and mark
-  // the wrong characters. Such names are rare — just skip highlighting them.
-  if (lower.length !== raw.length) return esc(raw);
+  // Match the same way the engine did: case-sensitively against the original
+  // when Match case is on, else folded. Skip names whose folded length differs
+  // (combining chars) to avoid index desync against `raw`.
+  const hay = highlightMatchCase ? raw : raw.toLowerCase();
+  if (hay.length !== raw.length) return esc(raw);
   const ranges: [number, number][] = [];
   for (const t of highlightTerms) {
-    let i = lower.indexOf(t);
+    let i = hay.indexOf(t);
     while (i !== -1) {
-      ranges.push([i, i + t.length]);
-      i = lower.indexOf(t, i + t.length);
+      if (!highlightWholeWord || highlightBounded(hay, i, t.length)) {
+        ranges.push([i, i + t.length]);
+      }
+      i = hay.indexOf(t, i + t.length);
     }
   }
   if (!ranges.length) return esc(raw);
@@ -871,7 +891,9 @@ async function runSearch(): Promise<void> {
   const seq = ++searchSeq;
   const isContent = HAS_CONTENT.test(options.query);
   // Highlight only the filename terms; the content term matches bodies, not names.
-  highlightTerms = computeHighlightTerms(stripContent(options.query), options.regex);
+  highlightTerms = computeHighlightTerms(stripContent(options.query), options.regex, options.matchCase);
+  highlightWholeWord = options.wholeWord;
+  highlightMatchCase = options.matchCase;
   try {
     // Content search reads files, so it's slower — show that it's working.
     if (isContent) countEl.textContent = "Searching file contents…";
