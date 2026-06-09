@@ -97,8 +97,10 @@ impl SearchResult {
 /// In-memory file index for a single volume.
 pub struct SearchIndex {
     entries: Vec<FileEntry>,
-    /// MFT record number -> position in `entries`.
-    by_record: HashMap<u64, u32>,
+    /// MFT record number -> positions in `entries`. A hardlinked file occupies
+    /// one MFT record but appears once per name, so a record maps to one position
+    /// per link; the live update/delete paths must touch every link, not one.
+    by_record: HashMap<u64, Vec<u32>>,
     /// Entry positions sorted by `name_lower`, for the instant default view.
     by_name: Vec<u32>,
     /// Set once live mutations make `by_name` stale.
@@ -130,9 +132,9 @@ impl SearchIndex {
 
     /// Rebuild the lookup map and the sorted name view from a set of entries.
     fn finalize(entries: Vec<FileEntry>, drive: char) -> Self {
-        let mut by_record = HashMap::with_capacity(entries.len());
+        let mut by_record: HashMap<u64, Vec<u32>> = HashMap::with_capacity(entries.len());
         for (i, e) in entries.iter().enumerate() {
-            by_record.insert(e.record.0, i as u32);
+            by_record.entry(e.record.0).or_default().push(i as u32);
         }
 
         let mut by_name: Vec<u32> = (0..entries.len() as u32).collect();
@@ -333,33 +335,66 @@ impl SearchIndex {
         }
     }
 
-    /// Insert or replace an entry (USN create / rename).
+    /// Insert or replace an entry (USN create / rename / metadata change).
     pub fn apply_upsert(&mut self, r: RawRecord) {
         let Some(entry) = raw_to_entry(r) else {
             return;
         };
         let record = entry.record.0;
-        if let Some(&idx) = self.by_record.get(&record) {
-            self.entries[idx as usize] = entry;
-        } else {
-            let idx = self.entries.len() as u32;
-            self.entries.push(entry);
-            self.by_record.insert(record, idx);
+        let target = match self.by_record.get(&record) {
+            // Unknown record — a new file or the first link.
+            None => None,
+            // Single-link file: replace that one row in place. A USN event can't
+            // say which old (parent, name) it replaced, but for a sole link a
+            // rename, a move, and a metadata change all update the same row — so
+            // match by record only (preserving the pre-hardlink behaviour).
+            Some(positions) if positions.len() == 1 => Some(positions[0]),
+            // Hardlinked record: the event names one link, so match it by parent
+            // + name and replace that link; an unmatched name is a newly-added
+            // hardlink, appended rather than clobbering a sibling.
+            Some(positions) => positions.iter().copied().find(|&p| {
+                let e = &self.entries[p as usize];
+                e.parent.0 == entry.parent.0 && e.name == entry.name
+            }),
+        };
+        match target {
+            Some(idx) => self.entries[idx as usize] = entry,
+            None => {
+                let idx = self.entries.len() as u32;
+                self.entries.push(entry);
+                self.by_record.entry(record).or_default().push(idx);
+            }
         }
         self.name_order_stale = true;
     }
 
-    /// Remove an entry (USN delete).
+    /// Remove an entry (USN delete). Removes **every** link of the record (a
+    /// hardlinked file frees its single MFT record on full deletion), repairing
+    /// `by_record` for each entry relocated by `swap_remove`.
     pub fn apply_delete(&mut self, record_no: u64) {
-        if let Some(idx) = self.by_record.remove(&record_no) {
+        let Some(mut positions) = self.by_record.remove(&record_no) else {
+            return;
+        };
+        // Remove highest index first so a swap_remove never relocates a position
+        // still queued for removal: the entry moved in from the end is always
+        // another record's (its index exceeds every remaining position to remove).
+        positions.sort_unstable_by(|a, b| b.cmp(a));
+        for pos in positions {
+            let pos = pos as usize;
             let last = self.entries.len() - 1;
-            self.entries.swap_remove(idx as usize);
-            if (idx as usize) != last {
-                let moved = self.entries[idx as usize].record.0;
-                self.by_record.insert(moved, idx);
+            self.entries.swap_remove(pos);
+            if pos != last {
+                let moved = self.entries[pos].record.0;
+                if let Some(v) = self.by_record.get_mut(&moved) {
+                    for p in v.iter_mut() {
+                        if *p == last as u32 {
+                            *p = pos as u32;
+                        }
+                    }
+                }
             }
-            self.name_order_stale = true;
         }
+        self.name_order_stale = true;
     }
 
     fn to_hit(&self, idx: usize) -> Hit {
@@ -388,7 +423,8 @@ impl SearchIndex {
         let mut parent = e.parent.0;
         let mut depth = 0;
         while parent != ROOT_RECORD && depth < MAX_PATH_DEPTH {
-            match self.by_record.get(&parent) {
+            // Any link of the parent record yields the same directory name.
+            match self.by_record.get(&parent).and_then(|v| v.first()) {
                 Some(&pi) => {
                     let pe = &self.entries[pi as usize];
                     parts.push(pe.name.as_str());
@@ -500,5 +536,123 @@ fn entry_view<'a>(e: &'a FileEntry, path: &'a str, path_lower: &'a str) -> Entry
         created_ms: e.created_ms,
         accessed_ms: e.accessed_ms,
         attributes: e.attributes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(record: u64, parent: u64, name: &str) -> EntrySnapshot {
+        EntrySnapshot {
+            record,
+            parent,
+            name: name.into(),
+            is_dir: false,
+            size: Some(1),
+            modified_ms: None,
+            created_ms: None,
+            accessed_ms: None,
+            attributes: 0,
+        }
+    }
+
+    fn raw(record: u64, parent: u64, name: &str) -> RawRecord {
+        RawRecord {
+            record_no: record,
+            parent_no: parent,
+            name: name.into(),
+            is_dir: false,
+            size: Some(1),
+            modified_ft: 0,
+            created_ft: 0,
+            accessed_ft: 0,
+            attributes: 0,
+        }
+    }
+
+    /// Every entry is reachable through `by_record`, and no slot is stale.
+    fn assert_by_record_consistent(idx: &SearchIndex) {
+        for (i, e) in idx.entries.iter().enumerate() {
+            let positions = idx.by_record.get(&e.record.0).expect("record is mapped");
+            assert!(
+                positions.contains(&(i as u32)),
+                "entry {i} (record {}) missing from by_record",
+                e.record.0
+            );
+        }
+        for (rec, positions) in &idx.by_record {
+            for &p in positions {
+                assert_eq!(
+                    idx.entries[p as usize].record.0, *rec,
+                    "stale by_record slot"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delete_removes_all_hardlinks_of_a_record() {
+        // Record 50 is hardlinked (two names); record 60 is unrelated.
+        let mut idx = SearchIndex::import(
+            'C',
+            vec![
+                snap(50, 5, "a.dll"),
+                snap(50, 6, "b.dll"),
+                snap(60, 5, "x.txt"),
+            ],
+        );
+        assert_eq!(idx.entries.len(), 3);
+        idx.apply_delete(50);
+        assert_eq!(idx.entries.len(), 1, "both links of record 50 must be gone");
+        assert_eq!(idx.entries[0].record.0, 60);
+        assert!(!idx.by_record.contains_key(&50));
+        assert_by_record_consistent(&idx);
+    }
+
+    #[test]
+    fn upsert_targets_the_named_link_and_appends_new_ones() {
+        let mut idx = SearchIndex::import('C', vec![snap(50, 5, "a.dll"), snap(50, 6, "b.dll")]);
+        // Updating an existing link (record + parent + name) replaces it, never a sibling.
+        idx.apply_upsert(raw(50, 6, "b.dll"));
+        assert_eq!(idx.entries.len(), 2);
+        // A new hardlink to the same record appends a row rather than clobbering one.
+        idx.apply_upsert(raw(50, 7, "c.dll"));
+        assert_eq!(idx.entries.len(), 3);
+        assert_eq!(idx.by_record.get(&50).map(Vec::len), Some(3));
+        let names: Vec<&str> = idx.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(["a.dll", "b.dll", "c.dll"]
+            .iter()
+            .all(|n| names.contains(n)));
+        assert_by_record_consistent(&idx);
+    }
+
+    #[test]
+    fn upsert_renames_single_link_in_place() {
+        // A single-link file's rename / move updates its row, never a duplicate.
+        let mut idx =
+            SearchIndex::import('C', vec![snap(50, 5, "foo.txt"), snap(60, 5, "other.txt")]);
+        idx.apply_upsert(raw(50, 5, "bar.txt")); // rename in place
+        assert_eq!(idx.entries.len(), 2, "rename must not leave a ghost row");
+        let r50 = idx.by_record.get(&50).expect("record 50");
+        assert_eq!(r50.len(), 1);
+        assert_eq!(idx.entries[r50[0] as usize].name, "bar.txt");
+        idx.apply_upsert(raw(50, 7, "bar.txt")); // move to a new parent
+        assert_eq!(idx.entries.len(), 2);
+        assert_eq!(idx.by_record.get(&50).map(Vec::len), Some(1));
+        assert_eq!(idx.entries[idx.by_record[&50][0] as usize].parent.0, 7);
+        assert_by_record_consistent(&idx);
+    }
+
+    #[test]
+    fn delete_repairs_by_record_for_swap_moved_entries() {
+        let snaps: Vec<EntrySnapshot> =
+            (10..20).map(|r| snap(r, 5, &format!("f{r}.txt"))).collect();
+        let mut idx = SearchIndex::import('C', snaps);
+        idx.apply_delete(12);
+        idx.apply_delete(18);
+        idx.apply_delete(10);
+        assert_eq!(idx.entries.len(), 7);
+        assert_by_record_consistent(&idx);
     }
 }

@@ -122,6 +122,10 @@ impl Indexer {
                             volume.resume_usn,
                         ));
                         committed.fetch_add(count, Ordering::Relaxed);
+                        // Clear `progress` immediately so a concurrent status()
+                        // (committed + progress) can't briefly count this volume
+                        // twice while progress still holds its just-committed count.
+                        progress.store(0, Ordering::Relaxed);
                         indexed.push(IndexedVolume { drive, serial });
                     }
                     Err(e) => last_error = e,

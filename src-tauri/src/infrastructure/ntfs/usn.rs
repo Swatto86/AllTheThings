@@ -230,7 +230,7 @@ fn run(
     };
     let state = query_journal(volume)?;
 
-    let journal_id = state.journal_id;
+    let mut journal_id = state.journal_id;
     let mut next_usn = start_usn.unwrap_or(state.next_usn);
     let mut out = vec![0u8; 64 * 1024];
 
@@ -246,15 +246,31 @@ fn run(
             usn_journal_id: journal_id,
         };
 
-        let returned = unsafe {
+        let read = unsafe {
             volume.device_io_control(
                 FSCTL_READ_USN_JOURNAL,
                 &request as *const _ as *const c_void,
                 size_of::<ReadUsnJournalDataV0>() as u32,
                 out.as_mut_ptr() as *mut c_void,
                 out.len() as u32,
-            )?
-        } as usize;
+            )
+        };
+        let returned = match read {
+            Ok(n) => n as usize,
+            // A read error must not kill the watcher — that would freeze live
+            // updates for this volume until the app restarts. The usual cause is
+            // the journal wrapping past our cursor after a churn burst
+            // (ERROR_JOURNAL_ENTRY_DELETED) or being recreated; either way re-sync
+            // to the current journal (accepting a bounded gap) and keep polling.
+            Err(_) => {
+                if let Ok(s) = query_journal(volume) {
+                    journal_id = s.journal_id;
+                    next_usn = s.next_usn;
+                }
+                thread::sleep(Duration::from_millis(400));
+                continue;
+            }
+        };
 
         next_usn = i64::from_le_bytes(out[0..8].try_into().unwrap());
 
