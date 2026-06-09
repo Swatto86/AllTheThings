@@ -286,18 +286,25 @@ impl SearchIndex {
     /// Rank by reconstructed full path (built once per match), honouring the
     /// folders-first grouping and sort direction.
     fn rank_by_path(&self, matched: &mut [u32], opts: &SearchOptions) -> Vec<Hit> {
-        let mut keyed: Vec<(u32, String)> = matched
+        // Key on a case-folded path so ordering matches the case-insensitive Name
+        // column (and Everything/Explorer); keep the original-cased path to
+        // display. Fold once per entry, not per comparison.
+        let mut keyed: Vec<(u32, String, String)> = matched
             .par_iter()
-            .map(|&i| (i, self.build_path(i as usize)))
+            .map(|&i| {
+                let path = self.build_path(i as usize);
+                let lower = path.to_lowercase();
+                (i, path, lower)
+            })
             .collect();
         if opts.folders_first {
             let asc = opts.ascending;
             keyed.par_sort_unstable_by(|a, b| {
                 let (ea, eb) = (&self.entries[a.0 as usize], &self.entries[b.0 as usize]);
-                dir_first(ea, eb).then_with(|| ordered(a.1.cmp(&b.1), asc))
+                dir_first(ea, eb).then_with(|| ordered(a.2.cmp(&b.2), asc))
             });
         } else {
-            keyed.par_sort_unstable_by(|a, b| a.1.cmp(&b.1));
+            keyed.par_sort_unstable_by(|a, b| a.2.cmp(&b.2));
             if !opts.ascending {
                 keyed.reverse();
             }
@@ -305,7 +312,7 @@ impl SearchIndex {
         keyed
             .into_iter()
             .take(opts.limit)
-            .map(|(i, path)| self.to_hit_with_path(i as usize, path))
+            .map(|(i, path, _)| self.to_hit_with_path(i as usize, path))
             .collect()
     }
 
@@ -427,10 +434,21 @@ fn ordered(ord: std::cmp::Ordering, ascending: bool) -> std::cmp::Ordering {
 }
 
 /// Extension slice of a lowercased name (after the last dot), or `""` if none.
+/// A leading dot is a dotfile (`.gitignore`), not an extension — matching what
+/// the UI's Ext column displays.
 fn ext_of(name_lower: &str) -> &str {
     match name_lower.rfind('.') {
-        Some(i) => &name_lower[i + 1..],
-        None => "",
+        Some(i) if i > 0 => &name_lower[i + 1..],
+        _ => "",
+    }
+}
+
+/// Ext sort key: blank for directories (whose Ext cell renders empty).
+fn dir_ext(e: &FileEntry) -> &str {
+    if e.is_dir {
+        ""
+    } else {
+        ext_of(&e.name_lower)
     }
 }
 
@@ -442,7 +460,8 @@ fn col_cmp(a: &FileEntry, b: &FileEntry, sort: SortKey) -> std::cmp::Ordering {
         SortKey::Modified => a.modified_ms.unwrap_or(0).cmp(&b.modified_ms.unwrap_or(0)),
         SortKey::Created => a.created_ms.unwrap_or(0).cmp(&b.created_ms.unwrap_or(0)),
         SortKey::Accessed => a.accessed_ms.unwrap_or(0).cmp(&b.accessed_ms.unwrap_or(0)),
-        SortKey::Ext => ext_of(&a.name_lower).cmp(ext_of(&b.name_lower)),
+        // Directories show a blank Ext cell in the UI, so sort them as such.
+        SortKey::Ext => dir_ext(a).cmp(dir_ext(b)),
         SortKey::Attributes => a.attributes.cmp(&b.attributes),
         SortKey::Path => std::cmp::Ordering::Equal,
     }

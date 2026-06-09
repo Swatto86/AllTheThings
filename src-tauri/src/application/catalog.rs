@@ -111,11 +111,16 @@ fn ordered(ord: std::cmp::Ordering, ascending: bool) -> std::cmp::Ordering {
     }
 }
 
-/// Lowercased extension of a hit's name (after the last dot), or `""`.
+/// Lowercased extension of a hit's name (after the last dot), or `""`. A leading
+/// dot is a dotfile, not an extension, and directories have no extension —
+/// matching the UI's Ext column so the sort agrees with what's displayed.
 fn hit_ext(h: &Hit) -> String {
+    if h.is_dir {
+        return String::new();
+    }
     match h.name.rfind('.') {
-        Some(i) => h.name[i + 1..].to_lowercase(),
-        None => String::new(),
+        Some(i) if i > 0 => h.name[i + 1..].to_lowercase(),
+        _ => String::new(),
     }
 }
 
