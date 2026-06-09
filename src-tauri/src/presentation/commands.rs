@@ -11,7 +11,12 @@ use tauri_plugin_opener::OpenerExt;
 use std::sync::atomic::Ordering;
 
 use crate::application::export::{self, ExportFormat};
-use crate::application::search::extract_content;
+use crate::application::search::{content_scope_ok, extract_content};
+
+/// Shown when `content:` is combined with a top-level OR, which can't be scoped.
+const CONTENT_OR_ERR: &str =
+    "content: applies to every result and can't be combined with a top-level OR (|). \
+     Put the alternation in parentheses, e.g. content:foo (a | b).";
 use crate::application::{IndexStatus, SearchOptions, SearchResult};
 use crate::infrastructure::fileops::{self, ShellVerb};
 use crate::infrastructure::service::scm::{self, SvcState};
@@ -68,6 +73,10 @@ pub async fn search_content(
         return tauri::async_runtime::spawn_blocking(move || handle.search(&opts))
             .await
             .map_err(|e| e.to_string());
+    }
+
+    if !content_scope_ok(&options.query) {
+        return Err(CONTENT_OR_ERR.into());
     }
 
     let generation = state.next_content_gen();
@@ -144,6 +153,9 @@ pub async fn export_results(
     let handle = state.search_handle();
     let (clean_query, terms) = extract_content(&options.query);
     let content_search = !terms.is_empty();
+    if content_search && !content_scope_ok(&options.query) {
+        return Err(CONTENT_OR_ERR.into());
+    }
 
     let mut opts = options;
     opts.query = clean_query;

@@ -109,8 +109,11 @@ enum TextTarget {
 enum TextKind {
     /// Substring; pre-cased to match the haystack casing.
     Plain(String),
-    /// Compiled wildcard / whole-word / regex pattern (case flag baked in).
-    Re(Regex),
+    /// Compiled wildcard / whole-word / regex pattern. `on_lower` matches the
+    /// pre-folded lowercase haystack (wildcard/whole-word built from lowercased
+    /// literals, so case folding is identical to `Plain`); otherwise it matches
+    /// the original-case haystack (user regex mode, or case-sensitive search).
+    Re { re: Regex, on_lower: bool },
 }
 
 /// A single test against one entry.
@@ -185,7 +188,12 @@ impl Matcher {
             };
             let pred = Pred::Text {
                 target,
-                kind: TextKind::Re(build_regex(query, case)?),
+                // User regex matches the original-case haystack (the regex crate's
+                // own case folding via `case_insensitive`).
+                kind: TextKind::Re {
+                    re: build_regex(query, case)?,
+                    on_lower: false,
+                },
             };
             return Ok(Self {
                 root: Some(Expr::Pred(pred)),
@@ -267,11 +275,33 @@ impl Matcher {
                             lower.contains(needle)
                         }
                     }
-                    TextKind::Re(re) => re.is_match(orig),
+                    TextKind::Re { re, on_lower } => {
+                        re.is_match(if *on_lower { lower } else { orig })
+                    }
                 }
             }
         }
     }
+}
+
+/// Whether a `content:` filter applies globally (and therefore correctly) for
+/// `query`. Content matching is a post-filter ANDed over every candidate, so it
+/// can't be scoped to one branch of a top-level OR (`|`). Returns false when the
+/// query has a `|` at paren-depth 0, so the caller can reject the query rather
+/// than silently mis-scoping the body search.
+pub fn content_scope_ok(query: &str) -> bool {
+    let mut depth = 0u32;
+    let mut in_quote = false;
+    for c in query.chars() {
+        match c {
+            '"' => in_quote = !in_quote,
+            '(' if !in_quote => depth += 1,
+            ')' if !in_quote => depth = depth.saturating_sub(1),
+            '|' if !in_quote && depth == 0 => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Pull every `content:term` / `content:"phrase"` out of `query`, returning the
@@ -650,20 +680,38 @@ fn text_pred(text: &str, target: TextTarget, opts: &SearchOptions) -> Option<Pre
     if text.is_empty() {
         return None;
     }
-    let kind = if text.contains('*') || text.contains('?') {
-        match build_regex(
-            &glob_pattern(text, glob_anchored(text, target)),
-            opts.match_case,
-        ) {
-            Ok(re) => TextKind::Re(re),
-            Err(_) => return None,
-        }
-    } else if opts.whole_word {
-        match build_regex(&word_pattern(text), opts.match_case) {
-            Ok(re) => TextKind::Re(re),
-            Err(_) => return None,
-        }
-    } else if opts.match_case {
+    // Wildcards take precedence over whole-word: a glob is already anchored to the
+    // whole name, so "whole word" adds nothing meaningful to an open-ended pattern.
+    let has_glob = text.contains('*') || text.contains('?');
+    if has_glob || opts.whole_word {
+        // Build the pattern with the SAME case folding as the Plain path: when
+        // case-insensitive, lowercase the literals and match the pre-folded
+        // lowercase haystack (`name_lower`/`path_lower`). This keeps results
+        // identical whether or not a query carries a wildcard / whole-word, even
+        // for non-ASCII characters where `to_lowercase` and the regex crate's
+        // case folding disagree.
+        let on_lower = !opts.match_case;
+        let src = if on_lower {
+            text.to_lowercase()
+        } else {
+            text.to_string()
+        };
+        let pattern = if has_glob {
+            glob_pattern(&src, glob_anchored(&src, target))
+        } else {
+            word_pattern(&src)
+        };
+        // Pattern literals are already correctly cased, so the regex itself is
+        // case-sensitive (`match_case = true`).
+        return match build_regex(&pattern, true) {
+            Ok(re) => Some(Pred::Text {
+                target,
+                kind: TextKind::Re { re, on_lower },
+            }),
+            Err(_) => None,
+        };
+    }
+    let kind = if opts.match_case {
         TextKind::Plain(text.to_string())
     } else {
         TextKind::Plain(text.to_lowercase())
@@ -774,8 +822,40 @@ fn word_pattern(token: &str) -> String {
     format!("{lead}{esc}{trail}")
 }
 
-/// Parse a `size:` value such as `>100mb`, `<=1gb`, `>=512`, or `4kb`.
+/// Parse a `size:` value such as `>100mb`, `<=1gb`, `>=512`, `4kb`, or an
+/// inclusive `A..B` range (one side may be empty: `..1mb`, `1mb..`).
 fn parse_size_filter(value: &str) -> Option<SizeFilter> {
+    // Inclusive range, mirroring the date filter: each side optional, reversed
+    // endpoints tolerated. A non-empty but unparseable side returns None (→ a
+    // never-match filter upstream).
+    if let Some((a, b)) = value.split_once("..") {
+        let lo = if a.trim().is_empty() {
+            None
+        } else {
+            Some(parse_size_bytes(a)?)
+        };
+        let hi = if b.trim().is_empty() {
+            None
+        } else {
+            Some(parse_size_bytes(b)?)
+        };
+        return match (lo, hi) {
+            (Some(lo), Some(hi)) => Some(SizeFilter {
+                min: Some(lo.min(hi)),
+                max: Some(lo.max(hi)),
+            }),
+            (Some(lo), None) => Some(SizeFilter {
+                min: Some(lo),
+                max: None,
+            }),
+            (None, Some(hi)) => Some(SizeFilter {
+                min: None,
+                max: Some(hi),
+            }),
+            (None, None) => None,
+        };
+    }
+
     let (op, rest) = if let Some(r) = value.strip_prefix(">=") {
         (">=", r)
     } else if let Some(r) = value.strip_prefix("<=") {
@@ -986,15 +1066,21 @@ fn span_days(start: NaiveDate, end: NaiveDate) -> Option<(i64, i64)> {
     Some((local_midnight_ms(start)?, local_midnight_ms(end)?))
 }
 
-/// Unix milliseconds at local-time midnight of `date`.
+/// Unix milliseconds at the start of `date` in local time. Normally local
+/// midnight; on a spring-forward day where the clock jumps at exactly 00:00 (a
+/// few zones, e.g. America/Sao_Paulo historically) midnight doesn't exist, so
+/// advance to the first valid wall-clock time of the day rather than returning
+/// `None` (which would silently drop the whole date filter).
 fn local_midnight_ms(date: NaiveDate) -> Option<i64> {
-    let naive = date.and_hms_opt(0, 0, 0)?;
-    Some(
-        Local
-            .from_local_datetime(&naive)
-            .earliest()?
-            .timestamp_millis(),
-    )
+    for hour in 0..6 {
+        let naive = date.and_hms_opt(hour, 0, 0)?;
+        // `.earliest()` also resolves a fall-back day (midnight twice) to the
+        // earlier instant, the correct start-of-day.
+        if let Some(dt) = Local.from_local_datetime(&naive).earliest() {
+            return Some(dt.timestamp_millis());
+        }
+    }
+    None
 }
 
 fn date_within(value: Option<i64>, filter: &DateFilter) -> bool {
@@ -1298,6 +1384,51 @@ mod tests {
     fn ext_tolerates_leading_dot() {
         assert!(hits(&matcher("ext:.dll"), "user32.dll", false, None));
         assert!(hits(&matcher("ext:.dll,.exe"), "app.exe", false, None));
+    }
+
+    #[test]
+    fn size_ranges() {
+        let m = matcher("size:1mb..5mb");
+        assert!(hits(&m, "f", false, Some(2 * 1024 * 1024)));
+        assert!(!hits(&m, "f", false, Some(512 * 1024)));
+        assert!(!hits(&m, "f", false, Some(6 * 1024 * 1024)));
+        // Reversed endpoints behave like the forward range.
+        assert!(hits(
+            &matcher("size:5mb..1mb"),
+            "f",
+            false,
+            Some(2 * 1024 * 1024)
+        ));
+        // One-sided ranges.
+        assert!(hits(&matcher("size:..1kb"), "f", false, Some(512)));
+        assert!(!hits(&matcher("size:..1kb"), "f", false, Some(4096)));
+        assert!(hits(
+            &matcher("size:1mb.."),
+            "f",
+            false,
+            Some(2 * 1024 * 1024)
+        ));
+    }
+
+    #[test]
+    fn case_folding_consistent_plain_and_glob() {
+        // A query gives the same hits whether or not it carries a wildcard, even
+        // for non-ASCII where to_lowercase and the regex crate's folding differ.
+        // 'Σ' folds (to_lowercase) to 'σ'; query 'ς' must miss it both ways.
+        assert_eq!(
+            hits(&matcher("ς"), "Σtest", false, None),
+            hits(&matcher("*ς*"), "Σtest", false, None),
+        );
+        // A normal ASCII glob is still case-insensitive by default.
+        assert!(hits(&matcher("*.PDF"), "report.pdf", false, None));
+    }
+
+    #[test]
+    fn content_scope_detects_top_level_or() {
+        assert!(content_scope_ok("report content:foo"));
+        assert!(content_scope_ok("content:foo (a | b)")); // OR inside a group is fine
+        assert!(!content_scope_ok("report content:foo | memo")); // top-level OR
+        assert!(content_scope_ok("\"a | b\" report")); // a `|` inside quotes is literal
     }
 
     #[test]
