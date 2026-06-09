@@ -64,28 +64,40 @@ pub fn register() -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the entry. Succeeds even if it is already absent.
+/// Remove the entry. Succeeds even if it is already absent. Both keys are always
+/// attempted (not short-circuited) so a transient failure on the first can't
+/// strand the second — a later retry then cleans whichever key remains.
 pub fn unregister() -> Result<(), String> {
-    delete_tree(DIRECTORY_KEY)?;
-    delete_tree(BACKGROUND_KEY)
+    let dir = delete_tree(DIRECTORY_KEY);
+    let bg = delete_tree(BACKGROUND_KEY);
+    dir.and(bg)
 }
 
 /// Write one verb: the label + icon on the base key, and the command on its
-/// `command` subkey.
+/// `command` subkey. On any failure after the base key is created, the whole
+/// subtree is rolled back — `is_registered()` only checks the base key, so a
+/// half-written verb (base present but command missing) would otherwise report
+/// as fully registered while the menu entry is inert.
 fn write_verb(base: &str, icon: &str, command: &str) -> Result<(), String> {
-    let key = create_key(base)?;
-    let label = set_string(key, None, VERB_LABEL);
-    let icon = set_string(key, Some("Icon"), icon);
-    // SAFETY: `key` from create_key.
-    unsafe { RegCloseKey(key) };
-    label?;
-    icon?;
+    let result = (|| {
+        let key = create_key(base)?;
+        let label = set_string(key, None, VERB_LABEL);
+        let icon = set_string(key, Some("Icon"), icon);
+        // SAFETY: `key` from create_key.
+        unsafe { RegCloseKey(key) };
+        label?;
+        icon?;
 
-    let cmd_key = create_key(&format!(r"{base}\command"))?;
-    let cmd = set_string(cmd_key, None, command);
-    // SAFETY: `cmd_key` from create_key.
-    unsafe { RegCloseKey(cmd_key) };
-    cmd
+        let cmd_key = create_key(&format!(r"{base}\command"))?;
+        let cmd = set_string(cmd_key, None, command);
+        // SAFETY: `cmd_key` from create_key.
+        unsafe { RegCloseKey(cmd_key) };
+        cmd
+    })();
+    if result.is_err() {
+        let _ = delete_tree(base);
+    }
+    result
 }
 
 fn create_key(subkey: &str) -> Result<HKEY, String> {
