@@ -203,21 +203,34 @@ pub async fn export_results(
 /// Open a file or folder with its default handler.
 #[tauri::command]
 pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    // Surface a stale result clearly instead of relying on the handler's error.
+    if !std::path::Path::new(&path).exists() {
+        return Err("The item no longer exists at that location".into());
+    }
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|e| e.to_string())
 }
 
-/// The shell icon for a file extension (or folder), as a base64 PNG.
+/// The shell icon for a file extension (or folder), as a base64 PNG. Async +
+/// spawn_blocking so a slow third-party shell icon handler can't stall the UI
+/// thread (SHGetFileInfoW may instantiate a COM icon handler on first touch).
 #[tauri::command]
-pub fn file_icon(ext: Option<String>, is_dir: bool) -> Option<String> {
-    icons::icon_base64(ext.as_deref(), is_dir)
+pub async fn file_icon(ext: Option<String>, is_dir: bool) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || icons::icon_base64(ext.as_deref(), is_dir))
+        .await
+        .ok()
+        .flatten()
 }
 
-/// The registry's friendly type name for a file extension (or folder).
+/// The registry's friendly type name for a file extension (or folder). Async for
+/// the same reason as [`file_icon`].
 #[tauri::command]
-pub fn file_type(ext: Option<String>, is_dir: bool) -> Option<String> {
-    icons::type_name(ext.as_deref(), is_dir)
+pub async fn file_type(ext: Option<String>, is_dir: bool) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || icons::type_name(ext.as_deref(), is_dir))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Current user settings, with the toggles backed by external state reconciled
@@ -332,6 +345,22 @@ pub fn hotkey_active(app: tauri::AppHandle, state: State<'_, SettingsState>) -> 
     hotkey::is_active(&app, &state.0.read().hotkey)
 }
 
+/// Suspend the global hotkey while the user is (re)binding it in Settings, so
+/// pressing the currently-bound combo is delivered to the capture box instead of
+/// triggering the shortcut (which would hide the window mid-rebind).
+#[tauri::command]
+pub fn suspend_hotkey(app: tauri::AppHandle) -> Result<(), String> {
+    hotkey::apply(&app, "")
+}
+
+/// Re-register the stored global hotkey after a rebind was cancelled (the capture
+/// box lost focus without committing a new combo).
+#[tauri::command]
+pub fn resume_hotkey(app: tauri::AppHandle, state: State<'_, SettingsState>) -> Result<(), String> {
+    let stored = state.0.read().hotkey.clone();
+    hotkey::apply(&app, &stored)
+}
+
 /// The folder passed via `--search-here` at launch (the Explorer context menu),
 /// for the frontend to scope its first search to. `None` for a normal launch.
 #[tauri::command]
@@ -389,6 +418,17 @@ pub fn shell_action(app: tauri::AppHandle, path: String, action: String) -> Resu
 #[tauri::command]
 pub fn reveal_path(path: String) -> Result<(), String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // The path is interpolated into explorer's quoted /select argument, so reject
+    // a `"` or control char that could break out of the quoting (defence in depth
+    // — real NTFS names can't contain `"`).
+    if path.contains('"') || path.chars().any(|c| c.is_control()) {
+        return Err("invalid path".into());
+    }
+    // Report a stale result (moved/deleted out of band) rather than launching a
+    // default Explorer window and returning Ok as if it had revealed the item.
+    if !std::path::Path::new(&path).exists() {
+        return Err("The item no longer exists at that location".into());
+    }
     Command::new("explorer.exe")
         .raw_arg(format!("/select,\"{path}\""))
         .creation_flags(CREATE_NO_WINDOW)

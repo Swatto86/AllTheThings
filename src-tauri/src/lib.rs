@@ -20,8 +20,9 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use presentation::commands::{
     delete_path, export_results, file_icon, file_type, get_settings, hotkey_active, index_status,
     initial_search, install_service, is_elevated, mark_service_prompt_seen, open_path, rename_path,
-    reveal_path, search, search_content, service_status, set_hotkey, set_settings, setup_service,
-    shell_action, start_hidden, start_service, stop_service, uninstall_service, uses_service,
+    resume_hotkey, reveal_path, search, search_content, service_status, set_hotkey, set_settings,
+    setup_service, shell_action, start_hidden, start_service, stop_service, suspend_hotkey,
+    uninstall_service, uses_service,
 };
 use presentation::settings::{self, SettingsState, StartFlags};
 use presentation::state::AppState;
@@ -111,6 +112,12 @@ pub fn run() {
     let settings = settings::load();
     let initial_hotkey = settings.hotkey.clone();
 
+    // Set when the user closes the window to the tray, so the startup reveal timer
+    // below doesn't pop a dismissed window back open within its 2.5s window.
+    let user_dismissed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dismissed_for_timer = user_dismissed.clone();
+    let dismissed_for_close = user_dismissed;
+
     tauri::Builder::default()
         // single-instance must be registered first: a second launch focuses the
         // running window (and, for an Explorer "Search here", scopes it to that
@@ -140,19 +147,24 @@ pub fn run() {
                 eprintln!("[hotkey] {e}");
             }
             // Reveal the window after a delay unless we launched into the tray.
-            // (The frontend normally shows it sooner, once painted.)
+            // (The frontend normally shows it sooner, once painted.) This is a
+            // safety net; skip it if the user already closed the window to the
+            // tray during the delay, so it doesn't override their dismissal.
             if !start_hidden_flag {
                 if let Some(window) = app.get_webview_window("main") {
+                    let dismissed = dismissed_for_timer.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(2500));
-                        let _ = window.show();
+                        if !dismissed.load(std::sync::atomic::Ordering::Relaxed) {
+                            let _ = window.show();
+                        }
                     });
                 }
             }
             maybe_suggest_service(app.handle());
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let close_to_tray = window
                     .app_handle()
@@ -161,6 +173,7 @@ pub fn run() {
                     .read()
                     .close_to_tray;
                 if close_to_tray {
+                    dismissed_for_close.store(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = window.hide();
                     api.prevent_close();
                 }
@@ -192,6 +205,8 @@ pub fn run() {
             is_elevated,
             set_hotkey,
             hotkey_active,
+            suspend_hotkey,
+            resume_hotkey,
             initial_search
         ])
         .run(tauri::generate_context!())
