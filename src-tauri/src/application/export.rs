@@ -76,8 +76,8 @@ fn write_csv(hits: &[Hit], w: &mut impl Write) -> io::Result<()> {
         writeln!(
             w,
             "{},{},{},{},{},{},{}",
-            csv_field(&h.name),
-            csv_field(&h.path),
+            csv_safe_field(&h.name),
+            csv_safe_field(&h.path),
             size_field(h),
             local_datetime(h.modified),
             local_datetime(h.created),
@@ -131,6 +131,18 @@ fn csv_field(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Like [`csv_field`] but also neutralises spreadsheet formula injection: a value
+/// beginning with a formula trigger (`=`/`+`/`-`/`@`, or a leading TAB/CR) is
+/// prefixed with a TAB and quoted so Excel/Sheets/Calc treat it as text rather
+/// than evaluating it (matching voidtools Everything's CSV export). Used only for
+/// the human-facing CSV Name/Path; EFU keeps raw filenames for machine round-trip.
+fn csv_safe_field(s: &str) -> String {
+    if matches!(s.chars().next(), Some('=' | '+' | '-' | '@' | '\t' | '\r')) {
+        return format!("\"\t{}\"", s.replace('"', "\"\""));
+    }
+    csv_field(s)
 }
 
 /// Format Unix milliseconds as a local `YYYY-MM-DD HH:MM:SS`, or empty if unknown.
@@ -192,6 +204,22 @@ mod tests {
             hit("b", "C:\\b", true, -1, 0x10),
         ];
         assert_eq!(render(&hits, ExportFormat::Txt), "C:\\a.txt\nC:\\b\n");
+    }
+
+    #[test]
+    fn csv_defuses_formula_injection() {
+        // A name starting with a formula trigger is forced to text (TAB prefix,
+        // quoted) so a spreadsheet can't evaluate it; EFU keeps the raw filename.
+        let hits = vec![hit("=cmd|calc", "C:\\=cmd|calc", false, 1, 0x20)];
+        let csv = render(&hits, ExportFormat::Csv);
+        let row = csv.lines().nth(1).unwrap();
+        assert!(
+            row.starts_with("\"\t=cmd|calc\""),
+            "CSV name not defused: {row}"
+        );
+        // EFU (a machine round-trip format) must NOT inject a TAB into the path.
+        let efu = render(&hits, ExportFormat::Efu);
+        assert!(efu.lines().nth(1).unwrap().starts_with("C:\\=cmd|calc"));
     }
 
     #[test]
