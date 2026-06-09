@@ -75,10 +75,36 @@ fn decode(bytes: &[u8]) -> Option<String> {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         return Some(decode_utf16(rest, false));
     }
-    if bytes.iter().take(SNIFF_BYTES).any(|&b| b == 0) {
-        return None; // binary
+    let sniff = &bytes[..bytes.len().min(SNIFF_BYTES)];
+    if sniff.contains(&0) {
+        // NULs usually mean binary — but BOM-less UTF-16 (common on Windows:
+        // .NET StreamWriter(Unicode), some PowerShell redirections) encodes ASCII
+        // as a byte + 0x00, so its NULs cluster on one offset parity. Decode those
+        // as UTF-16 instead of discarding the file as binary.
+        // `Some(endianness)` ⇒ decode as UTF-16; `None` ⇒ genuinely binary.
+        return utf16_parity(sniff).map(|little_endian| decode_utf16(bytes, little_endian));
     }
     Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// If a NUL-containing sniff window looks like BOM-less UTF-16 — many NULs, almost
+/// all on one byte-parity (the signature of ASCII-in-UTF-16) — return its
+/// endianness (`true` = little-endian, NULs on odd offsets). Otherwise `None`
+/// (treat as binary).
+fn utf16_parity(sniff: &[u8]) -> Option<bool> {
+    let even_nuls = sniff.iter().step_by(2).filter(|&&b| b == 0).count();
+    let odd_nuls = sniff.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+    // Require enough NULs to indicate 2-byte encoding (~a third of the window).
+    if (even_nuls + odd_nuls) * 3 < sniff.len() {
+        return None;
+    }
+    if odd_nuls > even_nuls * 4 {
+        Some(true) // little-endian: high byte (0x00) at odd offsets
+    } else if even_nuls > odd_nuls * 4 {
+        Some(false) // big-endian: high byte at even offsets
+    } else {
+        None
+    }
 }
 
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
@@ -112,6 +138,21 @@ mod tests {
         // "Hi" as UTF-16 LE with BOM.
         let bytes = [0xFF, 0xFE, b'H', 0x00, b'i', 0x00];
         assert_eq!(decode(&bytes).as_deref(), Some("Hi"));
+    }
+
+    #[test]
+    fn decodes_utf16_without_bom() {
+        // BOM-less UTF-16 (common on Windows) must be searchable, not skipped.
+        let le: Vec<u8> = "timeout"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(decode(&le).as_deref(), Some("timeout"));
+        let be: Vec<u8> = "timeout"
+            .encode_utf16()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
+        assert_eq!(decode(&be).as_deref(), Some("timeout"));
     }
 
     #[test]

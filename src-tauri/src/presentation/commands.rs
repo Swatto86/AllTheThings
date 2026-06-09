@@ -93,9 +93,13 @@ pub async fn search_content(
         let capped = candidates.total > CONTENT_CANDIDATE_CAP;
         let cancelled = || gen_flag.load(Ordering::SeqCst) != generation;
         let mut hits = content::filter_by_content(candidates.hits, &terms, match_case, &cancelled);
+        // Report the true match count, not the post-truncate length, so the UI's
+        // "N in files" reflects reality (mirrors the plain index path) even though
+        // only `display_limit` rows are returned for the virtual list.
+        let matched = hits.len();
         hits.truncate(display_limit);
         SearchResult {
-            total: hits.len(),
+            total: matched,
             took_ms: started.elapsed().as_millis(),
             hits,
             error: None,
