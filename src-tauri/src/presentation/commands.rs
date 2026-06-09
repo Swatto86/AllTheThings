@@ -222,7 +222,10 @@ pub fn get_settings(state: State<'_, SettingsState>) -> Settings {
 /// Persist settings and apply side effects (logon task + Explorer menu). The
 /// global hotkey is owned by `set_hotkey` and preserved here untouched.
 #[tauri::command]
-pub fn set_settings(state: State<'_, SettingsState>, mut settings: Settings) -> Result<(), String> {
+pub async fn set_settings(
+    state: State<'_, SettingsState>,
+    mut settings: Settings,
+) -> Result<(), String> {
     // Apply the two external side effects, but capture the FIRST error rather than
     // returning early: we must still reconcile and persist below, so a failure in
     // one step never silently discards the user's other changes (e.g.
@@ -232,18 +235,25 @@ pub fn set_settings(state: State<'_, SettingsState>, mut settings: Settings) -> 
     // Creating/deleting the logon task needs admin (tasks under the root folder
     // require it). Only touch it when the toggle actually changed (reconciled
     // from the real task), and relaunch elevated when the GUI isn't — mirroring
-    // the service commands — so an unelevated GUI can still manage it.
+    // the service commands. The task creation and the elevated `runas` relaunch
+    // (UAC prompt + waiting on the child) run on a blocking worker so they don't
+    // freeze the window.
     if settings.run_at_startup != startup::task_exists() {
-        let r = if elevation::is_elevated() {
-            apply_startup_task(settings.run_at_startup)
-        } else {
-            let arg = if settings.run_at_startup {
-                "--task-install"
+        let enable = settings.run_at_startup;
+        let r = tauri::async_runtime::spawn_blocking(move || {
+            if elevation::is_elevated() {
+                apply_startup_task(enable)
             } else {
-                "--task-uninstall"
-            };
-            elevation::run_elevated(arg)
-        };
+                let arg = if enable {
+                    "--task-install"
+                } else {
+                    "--task-uninstall"
+                };
+                elevation::run_elevated(arg)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         if let Err(e) = r {
             side_effect_err = Some(e);
         }
@@ -392,33 +402,33 @@ pub fn service_status() -> Result<SvcState, String> {
 
 /// Register the service (LocalSystem, auto-start, this exe + `--service`).
 #[tauri::command]
-pub fn install_service() -> Result<(), String> {
-    manage_service("--svc-install", scm::install)
+pub async fn install_service() -> Result<(), String> {
+    manage_service("--svc-install", scm::install).await
 }
 
 /// Stop (if running) and remove the service registration.
 #[tauri::command]
-pub fn uninstall_service() -> Result<(), String> {
-    manage_service("--svc-uninstall", scm::uninstall)
+pub async fn uninstall_service() -> Result<(), String> {
+    manage_service("--svc-uninstall", scm::uninstall).await
 }
 
 /// Start the installed service.
 #[tauri::command]
-pub fn start_service() -> Result<(), String> {
-    manage_service("--svc-start", scm::start)
+pub async fn start_service() -> Result<(), String> {
+    manage_service("--svc-start", scm::start).await
 }
 
 /// Stop the running service.
 #[tauri::command]
-pub fn stop_service() -> Result<(), String> {
-    manage_service("--svc-stop", scm::stop)
+pub async fn stop_service() -> Result<(), String> {
+    manage_service("--svc-stop", scm::stop).await
 }
 
 /// Install **and** start the service in one elevated step (one UAC prompt),
 /// used by the migration banner so adopting the service isn't two prompts.
 #[tauri::command]
-pub fn setup_service() -> Result<(), String> {
-    manage_service("--svc-setup", setup_service_direct)
+pub async fn setup_service() -> Result<(), String> {
+    manage_service("--svc-setup", setup_service_direct).await
 }
 
 fn setup_service_direct() -> Result<(), String> {
@@ -444,10 +454,21 @@ pub fn is_elevated() -> bool {
 /// Run a service-management action directly if already elevated, otherwise
 /// relaunch this exe elevated (UAC) to run the matching one-shot `--svc-*`
 /// command. `direct` and `elevated_arg` must be two routes to the same action.
-fn manage_service(elevated_arg: &str, direct: fn() -> Result<(), String>) -> Result<(), String> {
-    if elevation::is_elevated() {
-        direct()
-    } else {
-        elevation::run_elevated(elevated_arg)
-    }
+///
+/// Runs on a blocking worker, not the UI thread: the `runas` UAC prompt and the
+/// `WaitForSingleObject` on the elevated child (and the SCM calls in the
+/// already-elevated path) would otherwise freeze the window until they finish.
+async fn manage_service(
+    elevated_arg: &'static str,
+    direct: fn() -> Result<(), String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if elevation::is_elevated() {
+            direct()
+        } else {
+            elevation::run_elevated(elevated_arg)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
