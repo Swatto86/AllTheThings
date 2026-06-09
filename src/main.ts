@@ -1101,15 +1101,19 @@ function showMenu(x: number, y: number): void {
 // ---- File actions: rename (inline), delete (to Recycle Bin) ----
 function startRename(): void {
   if (selected < 0 || selected >= hits.length) return;
+  // Rename targets a single file: collapse any multi-selection down to the
+  // focused row so the highlight matches the one row being renamed.
+  if (selSet.size > 1) setSelection(selected);
   const h = hits[selected];
   // The row may have been scrolled out of the virtualized window; bring it back
-  // and re-render so its cell exists before we measure it.
+  // so its cell exists before we measure it. Always re-render so the cell is
+  // current and the collapsed selection is reflected.
   const top = selected * ROW_HEIGHT;
   if (top < viewport.scrollTop || top + ROW_HEIGHT > viewport.scrollTop + viewport.clientHeight) {
     suppressScrollCancel = true;
     viewport.scrollTop = top < viewport.scrollTop ? top : top + ROW_HEIGHT - viewport.clientHeight;
-    renderVisible();
   }
+  renderVisible();
   const rowEl = rows.querySelector<HTMLElement>(`[data-i="${selected}"]`);
   const nameIdx = columns.findIndex((c) => c.key === "name");
   const cell = rowEl?.children[nameIdx] as HTMLElement | undefined;
