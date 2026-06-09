@@ -480,8 +480,27 @@ function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
-// Whether the query asks to search inside file contents.
-const HAS_CONTENT = /(^|\s)content:/i;
+// Whether the query has a content: operator OUTSIDE any quoted phrase — mirrors
+// the backend's extract_content, so the "searching file contents" status and the
+// "N in files" count only fire when a body scan actually runs (a `content:`
+// inside "quotes" is a literal phrase, not the operator).
+function hasContentTerm(query: string): boolean {
+  let inQuote = false;
+  for (let i = 0; i < query.length; i++) {
+    if (query[i] === '"') {
+      inQuote = !inQuote;
+      continue;
+    }
+    if (
+      !inQuote &&
+      (i === 0 || /\s/.test(query[i - 1])) &&
+      query.slice(i, i + 8).toLowerCase() === "content:"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 // Remove `content:term` / `content:"phrase"` so the rest can be highlighted /
 // routed as a filename query (the content term matches bodies, not names).
 function stripContent(query: string): string {
@@ -889,7 +908,7 @@ function toggleColumn(key: ColKey): void {
 // ---- Search ----
 async function runSearch(): Promise<void> {
   const seq = ++searchSeq;
-  const isContent = HAS_CONTENT.test(options.query);
+  const isContent = hasContentTerm(options.query);
   // Highlight only the filename terms; the content term matches bodies, not names.
   highlightTerms = computeHighlightTerms(stripContent(options.query), options.regex, options.matchCase);
   highlightWholeWord = options.wholeWord;
@@ -1201,10 +1220,11 @@ function contentToken(raw: string): string {
 // instead of a literal name match.
 const FN_PREFIX = /^(ext|size|content|dm|dc|da|attrib|path|file|files|folder|folders|dir):/i;
 
-// Turn one Name word into a query term. Words containing grouping/negation
-// characters or a function prefix are quoted so they match literally (the
-// builder has dedicated fields for those); ordinary words — and wildcards —
-// stay bare so the match options still apply to them.
+// Turn one Name word into a query term. A word containing grouping/negation
+// characters or a function prefix is quoted so it matches literally (the builder
+// has dedicated fields for those). Quoting makes it a literal phrase, so any
+// wildcard or the Whole-word option does NOT apply to such a word; an ordinary
+// word stays bare so wildcards and the match options apply as usual.
 function nameWord(word: string): string {
   const clean = word.replace(/"/g, "");
   if (!clean) return "";
