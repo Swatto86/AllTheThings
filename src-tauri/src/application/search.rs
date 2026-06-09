@@ -129,6 +129,10 @@ enum Pred {
     Attrib(u32),
     File,
     Folder,
+    /// Matches nothing. Produced when a recognised filter (`size:`/`dm:`/…) has a
+    /// non-empty but unparseable value, so the query returns zero results instead
+    /// of silently dropping the filter and matching the entire index.
+    Never,
 }
 
 /// A node in the compiled boolean expression tree. Leaves are predicates;
@@ -249,6 +253,7 @@ impl Matcher {
                 date_within(value, filter)
             }
             Pred::Attrib(mask) => e.attributes & mask == *mask,
+            Pred::Never => false,
             Pred::Text { target, kind } => {
                 let (orig, lower) = match target {
                     TextTarget::Name => (e.name, e.name_lower),
@@ -534,6 +539,19 @@ fn strip_prefix_ci<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
         .then(|| &word[prefix.len()..])
 }
 
+/// Resolve a recognised filter (`size:`/`dm:`/`ext:`/…) into a predicate. An
+/// empty value is dropped (the user is mid-typing the operator). A non-empty but
+/// unparseable value (`size:gb`, `dm:2024-02-30`) yields a never-matching
+/// predicate, so the query returns zero results rather than silently dropping
+/// the filter and matching the entire index.
+fn filter_pred(value: &str, parsed: Option<Pred>) -> Option<Pred> {
+    match parsed {
+        Some(p) => Some(p),
+        None if value.trim().is_empty() => None,
+        None => Some(Pred::Never),
+    }
+}
+
 /// Parse a bare word into a predicate: a function (`ext:`/`size:`/`file:`/
 /// `folder:`/`path:`) or a text match.
 fn parse_word(
@@ -552,33 +570,32 @@ fn parse_word(
     }
     if let Some(v) = strip_prefix_ci(word, "ext:") {
         // Fold with Unicode `to_lowercase` to match the index's `name_lower`
-        // (the haystack is folded the same way); `to_ascii_lowercase` would
-        // miss non-ASCII extensions.
+        // (the haystack is folded the same way); `to_ascii_lowercase` would miss
+        // non-ASCII extensions. A leading dot (`ext:.dll`) is tolerated.
         let exts: Vec<String> = v
             .split([';', ','])
             .filter(|e| !e.is_empty())
-            .map(|e| e.to_lowercase())
+            .map(|e| e.strip_prefix('.').unwrap_or(e).to_lowercase())
             .collect();
-        return Ok(if exts.is_empty() {
-            None
-        } else {
-            Some(Pred::Ext(exts))
-        });
+        return Ok(filter_pred(
+            v,
+            (!exts.is_empty()).then_some(Pred::Ext(exts)),
+        ));
     }
     if let Some(v) = strip_prefix_ci(word, "size:") {
-        return Ok(parse_size_filter(v).map(Pred::Size));
+        return Ok(filter_pred(v, parse_size_filter(v).map(Pred::Size)));
     }
     if let Some(v) = strip_prefix_ci(word, "dm:") {
-        return Ok(date_pred(v, DateField::Modified));
+        return Ok(filter_pred(v, date_pred(v, DateField::Modified)));
     }
     if let Some(v) = strip_prefix_ci(word, "dc:") {
-        return Ok(date_pred(v, DateField::Created));
+        return Ok(filter_pred(v, date_pred(v, DateField::Created)));
     }
     if let Some(v) = strip_prefix_ci(word, "da:") {
-        return Ok(date_pred(v, DateField::Accessed));
+        return Ok(filter_pred(v, date_pred(v, DateField::Accessed)));
     }
     if let Some(v) = strip_prefix_ci(word, "attrib:") {
-        return Ok(parse_attrib(v).map(Pred::Attrib));
+        return Ok(filter_pred(v, parse_attrib(v).map(Pred::Attrib)));
     }
     if let Some(v) = strip_prefix_ci(word, "path:") {
         *needs_path = true;
@@ -634,7 +651,10 @@ fn text_pred(text: &str, target: TextTarget, opts: &SearchOptions) -> Option<Pre
         return None;
     }
     let kind = if text.contains('*') || text.contains('?') {
-        match build_regex(&glob_pattern(text), opts.match_case) {
+        match build_regex(
+            &glob_pattern(text, glob_anchored(text, target)),
+            opts.match_case,
+        ) {
             Ok(re) => TextKind::Re(re),
             Err(_) => return None,
         }
@@ -662,7 +682,12 @@ fn ext_allows(name_lower: &str, exts: &[String]) -> bool {
 }
 
 fn size_within(size: Option<u64>, filter: &SizeFilter) -> bool {
-    let bytes = size.unwrap_or(0);
+    // An unknown size must not masquerade as 0 — that would spuriously match
+    // `size:0`/`size:<N` and be excluded from `size:>0`. A size filter always
+    // carries at least one bound, so an unknown size satisfies none of them.
+    let Some(bytes) = size else {
+        return filter.min.is_none() && filter.max.is_none();
+    };
     if filter.min.is_some_and(|m| bytes < m) {
         return false;
     }
@@ -680,9 +705,30 @@ fn build_regex(pattern: &str, match_case: bool) -> Result<Regex, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Translate a `*`/`?` wildcard token into an anchored regex pattern.
-fn glob_pattern(glob: &str) -> String {
-    let mut p = String::from("^");
+/// Whether a wildcard query should anchor to the whole haystack. A name glob
+/// always does (`*.pdf` means the whole name). A path glob only anchors when the
+/// fragment is rooted at the drive (`C:\…`) or a separator; an interior fragment
+/// (`Downloads\*.pdf`) matches anywhere in the path, mirroring the substring
+/// semantics the same fragment has without a wildcard.
+fn glob_anchored(text: &str, target: TextTarget) -> bool {
+    match target {
+        TextTarget::Name => true,
+        TextTarget::Path => {
+            text.starts_with('\\') || {
+                let mut c = text.chars();
+                matches!((c.next(), c.next()), (Some(a), Some(':')) if a.is_ascii_alphabetic())
+            }
+        }
+    }
+}
+
+/// Translate a `*`/`?` wildcard token into a regex, anchored `^…$` when
+/// `anchored` (whole-haystack match) or unanchored (substring match).
+fn glob_pattern(glob: &str, anchored: bool) -> String {
+    let mut p = String::new();
+    if anchored {
+        p.push('^');
+    }
     let mut literal = String::new();
     for c in glob.chars() {
         if c == '*' || c == '?' {
@@ -698,16 +744,20 @@ fn glob_pattern(glob: &str) -> String {
     if !literal.is_empty() {
         p.push_str(&regex::escape(&literal));
     }
-    p.push('$');
+    if anchored {
+        p.push('$');
+    }
     p
 }
 
-/// Whole-word pattern. `\b` only fires at a word/non-word transition, so a token
-/// that begins or ends with a non-word character (`.gitignore`, `C++`, `+++`)
-/// could never satisfy `\b` at that edge and matched nothing. For a non-word
-/// edge, fall back to a non-word-or-anchor alternation instead. The regex crate
-/// has no lookaround, so the alternation consumes the boundary char — fine here,
-/// since the predicate only uses `is_match` (a boolean), never the match span.
+/// Whole-word pattern. `\b` alone only fires at a word/non-word transition, so a
+/// token that begins or ends with a non-word character (`.gitignore`, `C++`,
+/// `.log`) could never satisfy a bare `\b` at that edge. For a non-word edge use
+/// `(?:^|\b|\W)` / `(?:\b|\W|$)`: `\b` matches a word→non-word boundary (so `.log`
+/// matches `system.log`), `\W` matches a non-word→non-word boundary (`a .log`),
+/// and `^`/`$` match the whole-name case (`.gitignore`). The regex crate has no
+/// lookaround, so `\W` consumes the boundary char — fine here, since the
+/// predicate only uses `is_match` (a boolean), never the match span.
 fn word_pattern(token: &str) -> String {
     fn is_word(c: char) -> bool {
         c.is_alphanumeric() || c == '_'
@@ -715,11 +765,11 @@ fn word_pattern(token: &str) -> String {
     let esc = regex::escape(token);
     let lead = match token.chars().next() {
         Some(c) if is_word(c) => r"\b",
-        _ => r"(?:^|\W)",
+        _ => r"(?:^|\b|\W)",
     };
     let trail = match token.chars().next_back() {
         Some(c) if is_word(c) => r"\b",
-        _ => r"(?:\W|$)",
+        _ => r"(?:\b|\W|$)",
     };
     format!("{lead}{esc}{trail}")
 }
@@ -734,6 +784,9 @@ fn parse_size_filter(value: &str) -> Option<SizeFilter> {
         (">", r)
     } else if let Some(r) = value.strip_prefix('<') {
         ("<", r)
+    } else if let Some(r) = value.strip_prefix('=') {
+        // Explicit equals (`size:=0`, `size:=8mb`); the date parser accepts it too.
+        ("=", r)
     } else {
         ("=", value)
     };
@@ -748,9 +801,15 @@ fn parse_size_filter(value: &str) -> Option<SizeFilter> {
             min: Some(bytes),
             max: None,
         },
+        // Nothing is smaller than 0 bytes — `size:<0` must match nothing, not
+        // collapse to `<=0` (matching empty files) via saturating_sub.
+        "<" if bytes == 0 => SizeFilter {
+            min: Some(1),
+            max: Some(0),
+        },
         "<" => SizeFilter {
             min: None,
-            max: Some(bytes.saturating_sub(1)),
+            max: Some(bytes - 1),
         },
         "<=" => SizeFilter {
             min: None,
@@ -798,12 +857,35 @@ fn parse_date_filter(value: &str) -> Option<DateFilter> {
         return None;
     }
     if let Some((a, b)) = value.split_once("..") {
-        let (start, _) = parse_date_span(a)?;
-        let (_, end) = parse_date_span(b)?;
-        return Some(DateFilter {
-            min: Some(start),
-            max: Some(end - 1),
-        });
+        // Each side may be empty (open-ended: `..B` => up to B, `A..` => from A).
+        // A non-empty but unparseable side returns None (→ a never-match filter
+        // upstream), not a dropped predicate. A closed range tolerates reversed
+        // endpoints by taking the union span.
+        let span_a = if a.trim().is_empty() {
+            None
+        } else {
+            Some(parse_date_span(a)?)
+        };
+        let span_b = if b.trim().is_empty() {
+            None
+        } else {
+            Some(parse_date_span(b)?)
+        };
+        return match (span_a, span_b) {
+            (Some((sa, ea)), Some((sb, eb))) => Some(DateFilter {
+                min: Some(sa.min(sb)),
+                max: Some(ea.max(eb) - 1),
+            }),
+            (Some((sa, _)), None) => Some(DateFilter {
+                min: Some(sa),
+                max: None,
+            }),
+            (None, Some((_, eb))) => Some(DateFilter {
+                min: None,
+                max: Some(eb - 1),
+            }),
+            (None, None) => None,
+        };
     }
     let (op, rest) = split_date_op(value);
     let (start, end) = parse_date_span(rest)?;
@@ -1141,16 +1223,94 @@ mod tests {
 
     #[test]
     fn whole_word_matches_punctuation_edged_names() {
-        // `\b` cannot bound a token that starts/ends with punctuation, so these
-        // used to return nothing; they must match a file whose whole name is the
-        // token, while still rejecting non-whole-word occurrences.
+        // A non-word-edged token matches at any word boundary: the whole-name case
+        // (`.gitignore`), the common extension case (`.log` in `system.log` — the
+        // v0.15.0 regression this guards), and the glued-suffix case.
         assert!(hits(&ww_matcher(".gitignore"), ".gitignore", false, None));
-        assert!(!hits(&ww_matcher(".gitignore"), "x.gitignore", false, None));
+        assert!(hits(&ww_matcher(".log"), "system.log", false, None));
+        assert!(hits(&ww_matcher(".cfg"), "app.cfg", false, None));
         assert!(hits(&ww_matcher("C++"), "C++", false, None));
         assert!(hits(&ww_matcher("+++"), "+++", false, None));
+        // `.log` must not match a name that merely contains "log" without the dot.
+        assert!(!hits(&ww_matcher(".log"), "catalog", false, None));
         // An ordinary word token still behaves as a whole-word match.
         assert!(hits(&ww_matcher("report"), "the report.txt", false, None));
         assert!(!hits(&ww_matcher("report"), "reporter.txt", false, None));
+    }
+
+    #[test]
+    fn malformed_filter_value_matches_nothing_not_everything() {
+        // A recognised filter with a non-empty but unparseable value returns zero
+        // results, never the whole index. (An empty value stays a harmless drop.)
+        for q in [
+            "size:gb",
+            "size:>",
+            "size:abc",
+            "dm:2024-02-30",
+            "attrib:zzz",
+        ] {
+            let m = matcher(q);
+            assert!(!m.matches_all(), "{q} must not collapse to match-all");
+            assert!(!hits(&m, "anything.txt", false, Some(4096)), "{q} matched");
+        }
+        // A bare prefix (mid-typing) is still dropped, not a never-match.
+        assert!(matcher("size:").matches_all());
+        assert!(matcher("dm:").matches_all());
+    }
+
+    #[test]
+    fn size_explicit_equals_and_negative() {
+        assert!(hits(&matcher("size:=0"), "empty.txt", false, Some(0)));
+        assert!(!hits(&matcher("size:=0"), "data.bin", false, Some(8)));
+        assert!(hits(
+            &matcher("size:=8mb"),
+            "f.bin",
+            false,
+            Some(8 * 1024 * 1024)
+        ));
+        // size:<0 matches nothing (not 0-byte files).
+        let m = matcher("size:<0");
+        assert!(!m.matches_all());
+        assert!(!hits(&m, "empty.txt", false, Some(0)));
+    }
+
+    #[test]
+    fn unknown_size_is_not_treated_as_zero() {
+        // A file whose size is unknown must satisfy no bounded size filter.
+        assert!(!hits(&matcher("size:0"), "x", false, None));
+        assert!(!hits(&matcher("size:>0"), "x", false, None));
+    }
+
+    #[test]
+    fn open_ended_and_reversed_date_ranges() {
+        let ms = Some(1_718_452_800_000); // 2024-06-15
+                                          // `..B` => up to B; `A..` => from A.
+        assert!(eval_modified(&matcher("dm:..2024-12-31"), ms));
+        assert!(!eval_modified(&matcher("dm:..2024-01-01"), ms));
+        assert!(eval_modified(&matcher("dm:2024-01-01.."), ms));
+        assert!(!eval_modified(&matcher("dm:2025-01-01.."), ms));
+        assert!(!matcher("dm:..2024-12-31").matches_all());
+        // Reversed endpoints behave like the forward range.
+        assert!(eval_modified(&matcher("dm:2024-12-31..2024-01-01"), ms));
+    }
+
+    #[test]
+    fn ext_tolerates_leading_dot() {
+        assert!(hits(&matcher("ext:.dll"), "user32.dll", false, None));
+        assert!(hits(&matcher("ext:.dll,.exe"), "app.exe", false, None));
+    }
+
+    #[test]
+    fn path_fragment_glob_matches_interior() {
+        // A path fragment with a wildcard matches an interior path segment, the
+        // same as the fragment without a wildcard.
+        let m = matcher(r"Downloads\*.pdf");
+        assert!(m.needs_path());
+        assert!(path_hits(&m, r"C:\Users\Swatto\Downloads\report.pdf"));
+        assert!(!path_hits(&m, r"C:\Users\Swatto\Downloads\notes.txt"));
+        // A drive-rooted wildcard still anchors at the drive.
+        assert!(path_hits(&matcher(r"C:\Users\*.pdf"), r"C:\Users\a\b.pdf"));
+        assert!(!path_hits(&matcher(r"C:\Users\*.pdf"), r"D:\Other\b.pdf"));
     }
 
     #[test]
@@ -1214,12 +1374,22 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_year_is_dropped_not_panicking() {
+    fn out_of_range_year_matches_nothing_not_panicking() {
         // Years past chrono's range (and i32::MAX, which would overflow `year+1`)
-        // must drop the term rather than panic.
-        assert!(matcher("dm:2147483647").matches_all());
-        assert!(matcher("dm:>=999999999").matches_all());
-        assert!(matcher("dm:2147483647..2147483647").matches_all());
+        // must not panic. The value is non-empty but unparseable, so the query
+        // matches nothing rather than silently widening to the whole index.
+        for q in [
+            "dm:2147483647",
+            "dm:>=999999999",
+            "dm:2147483647..2147483647",
+        ] {
+            let m = matcher(q);
+            assert!(!m.matches_all(), "{q} must not collapse to match-all");
+            assert!(
+                !eval_modified(&m, Some(1_718_452_800_000)),
+                "{q} must match nothing"
+            );
+        }
     }
 
     #[test]
