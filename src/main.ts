@@ -152,7 +152,11 @@ function saveColumns(): void {
 
 let hits: Hit[] = [];
 let total = 0;
-let selected = -1;
+let selected = -1; // the active/focus row — anchor for keyboard nav, single actions
+// Multi-selection: the set of selected row indices plus the shift-range anchor.
+// Indices are always valid: any change to `hits` (new search / delete) clears it.
+const selSet = new Set<number>();
+let selAnchor = -1;
 let searchSeq = 0;
 let debounce: number | undefined;
 let highlightTerms: string[] = [];
@@ -776,6 +780,49 @@ function renderHeader(): void {
   wireHeader();
 }
 
+// ---- Selection ----
+function clearSelection(): void {
+  selSet.clear();
+  selected = -1;
+  selAnchor = -1;
+}
+// Replace the selection with a single row (plain click / arrow).
+function setSelection(i: number): void {
+  selSet.clear();
+  selSet.add(i);
+  selected = i;
+  selAnchor = i;
+}
+// Add/remove one row, keeping the rest (Ctrl/Cmd-click).
+function toggleSelection(i: number): void {
+  if (selSet.has(i)) selSet.delete(i);
+  else selSet.add(i);
+  selected = i;
+  selAnchor = i;
+}
+// Select the inclusive range from the anchor to `i` (Shift-click / Shift-arrow).
+function rangeSelection(i: number): void {
+  const from = selAnchor < 0 ? i : selAnchor;
+  selSet.clear();
+  for (let k = Math.min(from, i); k <= Math.max(from, i); k++) selSet.add(k);
+  selected = i;
+}
+function selectAll(): void {
+  selSet.clear();
+  for (let k = 0; k < hits.length; k++) selSet.add(k);
+  selected = hits.length - 1;
+  selAnchor = 0;
+}
+// Scroll the active row into the viewport.
+function scrollActiveIntoView(): void {
+  if (selected < 0) return;
+  const top = selected * ROW_HEIGHT;
+  if (top < viewport.scrollTop) viewport.scrollTop = top;
+  else if (top + ROW_HEIGHT > viewport.scrollTop + viewport.clientHeight) {
+    viewport.scrollTop = top + ROW_HEIGHT - viewport.clientHeight;
+  }
+}
+
 function renderVisible(): void {
   const scrollTop = viewport.scrollTop;
   const first = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 8);
@@ -784,9 +831,9 @@ function renderVisible(): void {
   let html = "";
   for (let i = first; i < last; i++) {
     const h = hits[i];
-    const sel = i === selected ? " selected" : "";
+    const cls = selSet.has(i) ? (i === selected ? " selected active" : " selected") : "";
     const cells = columns.map((c) => cellHtml(h, c.key)).join("");
-    html += `<div class="row${sel}" style="position:absolute;top:${i * ROW_HEIGHT}px;left:0;right:0" data-i="${i}">${cells}</div>`;
+    html += `<div class="row${cls}" style="position:absolute;top:${i * ROW_HEIGHT}px;left:0;right:0" data-i="${i}">${cells}</div>`;
   }
   rows.innerHTML = html;
 }
@@ -937,7 +984,7 @@ async function runSearch(): Promise<void> {
     }
     hits = res.hits;
     total = res.total;
-    selected = -1;
+    clearSelection();
     spacer.style.height = `${hits.length * ROW_HEIGHT}px`;
     viewport.scrollTop = 0;
     const partial = isContent && res.capped ? " (first 50,000 scanned)" : "";
@@ -989,31 +1036,51 @@ function hideMenu(): void {
 const RUNAS_EXTS = ["exe", "msi", "bat", "cmd", "com", "ps1", "scr"];
 type MenuRow = "sep" | [string, () => void];
 
-function showMenu(x: number, y: number, h: Hit): void {
-  const ext = h.isDir ? "" : extOf(h.name);
-  const rows: MenuRow[] = [
-    ["Open", () => invoke("open_path", { path: h.path }).catch(reportErr)],
-    ["Open containing folder", () => invoke("reveal_path", { path: h.path }).catch(reportErr)],
-  ];
-  if (!h.isDir) {
-    rows.push(["Open with…", () => invoke("shell_action", { path: h.path, action: "open_with" }).catch(reportErr)]);
+// The Hits currently selected, in selection (insertion) order, filtered to valid
+// indices.
+function selectedHits(): Hit[] {
+  return [...selSet].filter((i) => i >= 0 && i < hits.length).map((i) => hits[i]);
+}
+
+function showMenu(x: number, y: number): void {
+  const targets = selectedHits();
+  if (!targets.length) return;
+  const items: MenuRow[] = [];
+  if (targets.length > 1) {
+    // Multi-selection: only actions that make sense for a set.
+    items.push(
+      ["Copy full paths", () => copy(targets.map((h) => h.path).join("\n"))],
+      ["Copy names", () => copy(targets.map((h) => h.name).join("\n"))],
+      "sep",
+      [`Delete ${targets.length} items`, () => deleteSelected()],
+    );
+  } else {
+    const h = targets[0];
+    const ext = h.isDir ? "" : extOf(h.name);
+    items.push(
+      ["Open", () => invoke("open_path", { path: h.path }).catch(reportErr)],
+      ["Open containing folder", () => invoke("reveal_path", { path: h.path }).catch(reportErr)],
+    );
+    if (!h.isDir) {
+      items.push(["Open with…", () => invoke("shell_action", { path: h.path, action: "open_with" }).catch(reportErr)]);
+    }
+    if (RUNAS_EXTS.includes(ext)) {
+      items.push(["Run as administrator", () => invoke("shell_action", { path: h.path, action: "run_as" }).catch(reportErr)]);
+    }
+    items.push(
+      "sep",
+      ["Copy full path", () => copy(h.path)],
+      ["Copy name", () => copy(h.name)],
+      "sep",
+      ["Rename", () => startRename()],
+      ["Delete", () => deleteSelected()],
+      "sep",
+      ["Properties", () => invoke("shell_action", { path: h.path, action: "properties" }).catch(reportErr)],
+    );
   }
-  if (RUNAS_EXTS.includes(ext)) {
-    rows.push(["Run as administrator", () => invoke("shell_action", { path: h.path, action: "run_as" }).catch(reportErr)]);
-  }
-  rows.push(
-    "sep",
-    ["Copy full path", () => copy(h.path)],
-    ["Copy name", () => copy(h.name)],
-    "sep",
-    ["Rename", () => startRename()],
-    ["Delete", () => deleteSelected()],
-    "sep",
-    ["Properties", () => invoke("shell_action", { path: h.path, action: "properties" }).catch(reportErr)],
-  );
 
   const actions: (() => void)[] = [];
-  menu.innerHTML = rows
+  menu.innerHTML = items
     .map((r) => {
       if (r === "sep") return `<div class="sep"></div>`;
       const i = actions.push(r[1]) - 1;
@@ -1027,7 +1094,7 @@ function showMenu(x: number, y: number, h: Hit): void {
     };
   });
   menu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
-  menu.style.top = `${Math.min(y, window.innerHeight - rows.length * 28)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - items.length * 28)}px`;
   menu.classList.remove("hidden");
 }
 
@@ -1092,22 +1159,24 @@ async function commitRename(restoreFocus: boolean): Promise<void> {
 }
 
 async function deleteSelected(): Promise<void> {
-  if (selected < 0 || selected >= hits.length || confirmResolve !== null) return;
-  const h = hits[selected];
+  if (confirmResolve !== null) return;
+  // Snapshot the targets by IDENTITY so a background search swapping `hits`
+  // during the confirm can't redirect the delete to different rows.
+  const targets = selectedHits();
+  if (!targets.length) return;
   const seq = searchSeq;
-  if (!(await confirmDelete(h.name))) return;
+  const label = targets.length === 1 ? `"${targets[0].name}"` : `${targets.length} items`;
+  if (!(await confirmDelete(label))) return;
   try {
-    await invoke("delete_path", { path: h.path });
-    // A background search may have replaced `hits` (and reset `selected`) while
-    // the confirm dialog was open. If so it already reflects current state —
-    // don't splice by the stale index, which would drop the wrong row and skew
-    // the count. Otherwise remove the row by identity, not the cached index.
+    // One Recycle Bin operation for the whole set — a single undo group.
+    await invoke("delete_paths", { paths: targets.map((h) => h.path) });
+    // A newer search already owns the display — leave it; the recycled files
+    // simply won't reappear on the next search.
     if (seq !== searchSeq) return;
-    const idx = hits.indexOf(h);
-    if (idx < 0) return;
-    hits.splice(idx, 1);
-    total = Math.max(0, total - 1);
-    if (selected >= hits.length) selected = hits.length - 1;
+    const removed = new Set(targets);
+    hits = hits.filter((h) => !removed.has(h));
+    total = Math.max(0, total - targets.length);
+    clearSelection();
     spacer.style.height = `${hits.length * ROW_HEIGHT}px`;
     countEl.textContent = `${total.toLocaleString()} found`;
     renderVisible();
@@ -1119,8 +1188,8 @@ async function deleteSelected(): Promise<void> {
 // ---- Confirm dialog ----
 let confirmResolve: ((ok: boolean) => void) | null = null;
 
-function confirmDelete(name: string): Promise<boolean> {
-  confirmMsg.textContent = `Move "${name}" to the Recycle Bin?`;
+function confirmDelete(label: string): Promise<boolean> {
+  confirmMsg.textContent = `Move ${label} to the Recycle Bin?`;
   confirmOverlay.classList.remove("hidden");
   confirmOk.focus();
   return new Promise((resolve) => {
@@ -1977,7 +2046,10 @@ rows.addEventListener("dblclick", (e) => {
 rows.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(".row");
   if (!el) return;
-  selected = Number(el.dataset.i);
+  const i = Number(el.dataset.i);
+  if (e.shiftKey) rangeSelection(i);
+  else if (e.ctrlKey || e.metaKey) toggleSelection(i);
+  else setSelection(i);
   renderVisible();
 });
 
@@ -1985,9 +2057,13 @@ rows.addEventListener("contextmenu", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(".row");
   if (!el) return;
   e.preventDefault();
-  selected = Number(el.dataset.i);
+  const i = Number(el.dataset.i);
+  // Right-clicking a row outside the current selection selects just it; within
+  // the selection, keep the multi-selection. Either way it becomes the active row.
+  if (!selSet.has(i)) setSelection(i);
+  else selected = i;
   renderVisible();
-  showMenu(e.clientX, e.clientY, hits[selected]);
+  showMenu(e.clientX, e.clientY);
 });
 
 foldersFirstBtn.addEventListener("click", () => {
@@ -2194,11 +2270,17 @@ window.addEventListener("keydown", (e) => {
 q.addEventListener("keydown", (e) => {
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
-    selected = Math.min(hits.length - 1, Math.max(0, selected + (e.key === "ArrowDown" ? 1 : -1)));
-    const top = selected * ROW_HEIGHT;
-    if (top < viewport.scrollTop) viewport.scrollTop = top;
-    if (top + ROW_HEIGHT > viewport.scrollTop + viewport.clientHeight)
-      viewport.scrollTop = top + ROW_HEIGHT - viewport.clientHeight;
+    if (!hits.length) return;
+    const next = Math.min(hits.length - 1, Math.max(0, selected + (e.key === "ArrowDown" ? 1 : -1)));
+    // Shift extends the selection from the anchor; otherwise it's a single move.
+    if (e.shiftKey) rangeSelection(next);
+    else setSelection(next);
+    scrollActiveIntoView();
+    renderVisible();
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A") && hits.length) {
+    // Select every result (takes precedence over selecting the search text).
+    e.preventDefault();
+    selectAll();
     renderVisible();
   } else if (e.key === "Enter" && selected >= 0) {
     invoke("open_path", { path: hits[selected].path }).catch(reportErr);

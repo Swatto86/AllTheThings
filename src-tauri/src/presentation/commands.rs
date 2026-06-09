@@ -396,6 +396,12 @@ pub fn delete_path(path: String) -> Result<(), String> {
     fileops::recycle(&path)
 }
 
+/// Move several items to the Recycle Bin in one operation (one undo group).
+#[tauri::command]
+pub fn delete_paths(paths: Vec<String>) -> Result<(), String> {
+    fileops::recycle_many(&paths)
+}
+
 /// Invoke a shell verb (`properties` / `open_with` / `run_as`) on the item.
 ///
 /// The dialog it opens needs the UI thread's message pump, so the verb is run on

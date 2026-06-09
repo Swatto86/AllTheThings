@@ -82,9 +82,22 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// Move the item at `path` to the Recycle Bin. UI-less and non-interactive — the
 /// caller is expected to confirm beforehand.
 pub fn recycle(path: &str) -> Result<(), String> {
-    // `pFrom` is a double-null-terminated, null-separated list of paths.
-    let mut from: Vec<u16> = path.encode_utf16().collect();
-    from.push(0);
+    recycle_many(std::slice::from_ref(&path.to_string()))
+}
+
+/// Move every item in `paths` to the Recycle Bin in a single shell operation, so
+/// they share one undo group and one progress UI. UI-less and non-interactive.
+pub fn recycle_many(paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // `pFrom` is a double-null-terminated, null-separated list of paths: each path
+    // is NUL-terminated and the whole list ends with an extra NUL.
+    let mut from: Vec<u16> = Vec::new();
+    for p in paths {
+        from.extend(p.encode_utf16());
+        from.push(0);
+    }
     from.push(0);
 
     let mut op: SHFILEOPSTRUCTW = unsafe { zeroed() };

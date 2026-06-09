@@ -78,6 +78,11 @@ body,
   background: oklch(var(--p) / 0.32);
   box-shadow: inset 3px 0 0 oklch(var(--p));
 }
+/* The active/focus row within a multi-selection — slightly stronger. */
+.row.active,
+.row.active:hover {
+  background: oklch(var(--p) / 0.42);
+}
 
 #head [data-sort] {
   cursor: pointer;
