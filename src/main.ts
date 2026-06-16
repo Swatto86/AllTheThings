@@ -64,7 +64,6 @@ interface Column {
   /** Backend sort column, or `null` for client-only columns (no sorting). */
   sort: SortKey | null;
   width: number;
-  flex: boolean;
 }
 
 const ROW_HEIGHT = 26;
@@ -105,15 +104,15 @@ const options: SearchOptions = {
 // Every column the UI can show. The active set (which, in what order, at what
 // width) is user-chosen via the header right-click picker and persisted.
 const ALL_COLUMNS: readonly Column[] = [
-  { key: "name", label: "Name", sort: "name", width: 340, flex: false },
-  { key: "path", label: "Path", sort: "path", width: 0, flex: true },
-  { key: "size", label: "Size", sort: "size", width: 96, flex: false },
-  { key: "date", label: "Date modified", sort: "modified", width: 160, flex: false },
-  { key: "created", label: "Date created", sort: "created", width: 160, flex: false },
-  { key: "accessed", label: "Date accessed", sort: "accessed", width: 160, flex: false },
-  { key: "type", label: "Type", sort: null, width: 150, flex: false },
-  { key: "ext", label: "Ext", sort: "ext", width: 70, flex: false },
-  { key: "attributes", label: "Attributes", sort: "attributes", width: 96, flex: false },
+  { key: "name", label: "Name", sort: "name", width: 320 },
+  { key: "path", label: "Path", sort: "path", width: 470 },
+  { key: "size", label: "Size", sort: "size", width: 96 },
+  { key: "date", label: "Date modified", sort: "modified", width: 160 },
+  { key: "created", label: "Date created", sort: "created", width: 160 },
+  { key: "accessed", label: "Date accessed", sort: "accessed", width: 160 },
+  { key: "type", label: "Type", sort: null, width: 150 },
+  { key: "ext", label: "Ext", sort: "ext", width: 70 },
+  { key: "attributes", label: "Attributes", sort: "attributes", width: 96 },
 ];
 const DEFAULT_COLUMNS: ColKey[] = ["name", "path", "size", "date"];
 const COLUMNS_KEY = "att.columns";
@@ -132,7 +131,10 @@ function loadColumns(): Column[] {
       for (const s of saved as { key: ColKey; width?: number }[]) {
         if (cols.some((c) => c.key === s.key)) continue;
         const base = ALL_COLUMNS.find((c) => c.key === s.key);
-        if (base) cols.push({ ...base, width: typeof s.width === "number" ? s.width : base.width });
+        // Ignore a missing or too-small width and fall back to the template's:
+        // legacy saves stored the (then-flexible) Path column as width 0, which
+        // would now render as a zero-width column.
+        if (base) cols.push({ ...base, width: typeof s.width === "number" && s.width >= 40 ? s.width : base.width });
       }
       if (cols.some((c) => c.key === "name")) return cols;
     }
@@ -213,9 +215,9 @@ app.innerHTML = /* html */ `
       <div id="count" class="text-xs opacity-60 whitespace-nowrap min-w-[130px] text-right"></div>
     </div>
     <div id="head" class="row !h-7 font-semibold text-xs opacity-70 border-b border-base-300 bg-base-200"></div>
-    <div id="viewport" class="flex-1 overflow-y-auto scroll-thin relative">
+    <div id="viewport" class="flex-1 overflow-auto scroll-thin relative">
       <div id="spacer"></div>
-      <div id="rows" class="absolute top-0 left-0 right-0"></div>
+      <div id="rows" class="absolute top-0 left-0"></div>
     </div>
     <div id="status" class="text-xs px-2 py-1 border-t border-base-300 bg-base-200 opacity-80"></div>
   </div>
@@ -740,8 +742,25 @@ function typeLabel(h: Hit): string {
 
 // ---- Table ----
 function setCols(): void {
-  const tmpl = columns.map((c) => (c.flex ? "minmax(140px,1fr)" : `${c.width}px`)).join(" ");
+  // Every column is an explicit pixel width (so each one is resizable). A trailing
+  // flexible track absorbs the slack when the columns are narrower than the
+  // viewport; it collapses to zero when they overflow, at which point the results
+  // area scrolls horizontally so a column can be widened to fit its content.
+  const tmpl = columns.map((c) => `${c.width}px`).join(" ") + " minmax(0, 1fr)";
   app.style.setProperty("--cols", tmpl);
+  // Drive the horizontal scroll extent from the (always-present) spacer rather
+  // than the virtualized rows, so it stays stable as rows are rebuilt and even
+  // when there are no results. 16px = the row's 0.5rem horizontal padding.
+  const totalPx = columns.reduce((sum, c) => sum + c.width, 0) + 16;
+  spacer.style.width = `${totalPx}px`;
+  syncHeadScroll();
+}
+
+// The header sits above the (vertically) scrolling viewport, so it doesn't move
+// when the rows scroll horizontally. Translate it to match the viewport's
+// horizontal offset so the column headers stay aligned with their cells.
+function syncHeadScroll(): void {
+  head.style.transform = `translateX(${-viewport.scrollLeft}px)`;
 }
 
 function cellHtml(h: Hit, key: ColKey): string {
@@ -771,7 +790,7 @@ function renderHeader(): void {
   head.innerHTML = columns
     .map((c) => {
       const ind = c.sort && c.sort === options.sort ? (options.ascending ? " ▲" : " ▼") : "";
-      const grip = c.flex ? "" : `<span class="grip" data-grip="${c.key}"></span>`;
+      const grip = `<span class="grip" data-grip="${c.key}"></span>`;
       const align = c.key === "size" ? "text-right pr-2" : "";
       const sortable = c.sort ? "" : " not-sortable";
       return `<div data-col="${c.key}" draggable="true" class="${align}${sortable}">${c.label}<span class="ind">${ind}</span>${grip}</div>`;
@@ -833,7 +852,7 @@ function renderVisible(): void {
     const h = hits[i];
     const cls = selSet.has(i) ? (i === selected ? " selected active" : " selected") : "";
     const cells = columns.map((c) => cellHtml(h, c.key)).join("");
-    html += `<div class="row${cls}" style="position:absolute;top:${i * ROW_HEIGHT}px;left:0;right:0" data-i="${i}">${cells}</div>`;
+    html += `<div class="row${cls}" style="position:absolute;top:${i * ROW_HEIGHT}px;left:0" data-i="${i}">${cells}</div>`;
   }
   rows.innerHTML = html;
 }
@@ -1993,6 +2012,7 @@ q.addEventListener("blur", () => {
 viewport.addEventListener(
   "scroll",
   () => {
+    syncHeadScroll(); // keep the header aligned during horizontal scrolling
     hideMenu();
     colMenu.classList.add("hidden");
     // A user scroll cancels an in-progress rename; a scroll we triggered to
@@ -2003,7 +2023,10 @@ viewport.addEventListener(
   },
   { passive: true },
 );
-window.addEventListener("resize", renderVisible);
+window.addEventListener("resize", () => {
+  renderVisible();
+  syncHeadScroll();
+});
 
 head.addEventListener("contextmenu", (e) => {
   e.preventDefault();

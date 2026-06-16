@@ -9,9 +9,10 @@ body,
   margin: 0;
 }
 
-/* Thin scrollbar for the results viewport */
+/* Thin scrollbar for the results viewport (both axes) */
 .scroll-thin::-webkit-scrollbar {
   width: 10px;
+  height: 10px;
 }
 .scroll-thin::-webkit-scrollbar-thumb {
   background: oklch(var(--bc) / 0.25);
@@ -30,10 +31,20 @@ body,
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
+  /* Fill the viewport when the columns are narrower than it, but grow to the
+     total column width when they're wider (the viewport then scrolls). */
+  min-width: 100%;
+  width: max-content;
 }
 .row > div {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* The virtualized row container takes the same intrinsic width as the rows so it
+   establishes the viewport's horizontal scroll extent. */
+#rows {
+  min-width: 100%;
+  width: max-content;
 }
 .row .cell-icon {
   display: inline-block;
